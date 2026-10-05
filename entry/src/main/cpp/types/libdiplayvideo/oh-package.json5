@@ -1,0 +1,6 @@
+{
+  "name": "libdiplayvideo.so",
+  "version": "1.0.0",
+  "description": "Native HarmonyOS video decoder bridge",
+  "types": "./index.d.ts"
+}

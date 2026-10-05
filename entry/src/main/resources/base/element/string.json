@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "DiPlay Harmony 无线 CarPlay 显示接收端"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "通过平板热点显示 CarPlay 画面并使用触控操作"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DiPlay Harmony"
+    },
+    {
+      "name": "bluetooth_reason",
+      "value": "连接您选择的已配对 iPhone，建立无线 CarPlay 画面连接"
+    }
+  ]
+}

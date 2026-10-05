@@ -1,0 +1,13 @@
+{
+  "name": "diplay-harmony-tests",
+  "version": "0.12.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "test": "node tools/run-tests.cjs",
+    "audit:public": "python tools/audit-public.py"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
