@@ -2,6 +2,7 @@
 **/oh_modules/
 node_modules/
 **/build/
+**/.cxx/
 .idea/
 local.properties
 /work/

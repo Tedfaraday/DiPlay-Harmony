@@ -59,10 +59,15 @@
 
 ```powershell
 $env:DEVECO_STUDIO_HOME = '<你的 DevEco Studio 安装目录>'
+Copy-Item build-profile.template.json5 build-profile.json5
+& "$env:DEVECO_STUDIO_HOME/tools/ohpm/bin/ohpm.bat" install
+Push-Location entry
+& "$env:DEVECO_STUDIO_HOME/tools/ohpm/bin/ohpm.bat" install
+Pop-Location
 .\tools\build.ps1
 ```
 
-无实验认证材料可以构建和打开界面，但不能完成完整无线认证。认证导入工具要求你自行提供有权使用的本地 APK：
+根目录与 `entry` 模块需要分别安装 ohpm 依赖；否则原生桥类型会丢失并导致 ArkTS 类型错误。无实验认证材料可以构建界面，真机打开仍需自己的签名，完整无线认证还需要本地实验材料。认证导入工具要求你自行提供有权使用的本地 APK：
 
 ```powershell
 .\tools\import-auth.ps1 -ApkPath '<本地 DiPlay APK 路径>'

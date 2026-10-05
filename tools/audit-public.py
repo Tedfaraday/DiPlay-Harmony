@@ -4,7 +4,7 @@ from zipfile import ZipFile
 import hashlib,json,re,sys,subprocess
 ROOT=Path(__file__).resolve().parent.parent
 BAD_EXT={'.p12','.pfx','.pk8','.p7b','.pem','.cer','.der','.profile','.hap','.apk','.log','.mp4','.jpg','.jpeg'}
-SKIP={'.git','node_modules','oh_modules','.hvigor','.idea','build','work','dist','publication'}
+SKIP={'.git','.cxx','node_modules','oh_modules','.hvigor','.idea','build','work','dist','publication'}
 patterns={
  'private-key':re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----'),
  'github-token':re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{25,}|github_pat_[A-Za-z0-9_]{30,})\b'),
@@ -14,7 +14,12 @@ patterns={
  'real-signing-config':re.compile(r'"(?:storePassword|keyPassword|storeFile|profile)"\s*:\s*"[^"\n]+"'),
 }
 issues=[];files=[]
-for p in ROOT.rglob('*'):
+if (ROOT/'.git').exists():
+ listing=subprocess.run(['git','ls-files','--cached','--others','--exclude-standard','-z'],cwd=ROOT,capture_output=True,check=True).stdout
+ candidates=[ROOT/path for path in listing.decode('utf-8').split('\0') if path]
+else:
+ candidates=list(ROOT.rglob('*'))
+for p in candidates:
  rel=p.relative_to(ROOT)
  if any(part in SKIP for part in rel.parts):continue
  if p.is_symlink():issues.append((rel.as_posix(),'symlink'));continue
