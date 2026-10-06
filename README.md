@@ -4,6 +4,12 @@
 
 让鸿蒙平板接收 iPhone 的 CarPlay 画面，并用平板触控操作。当前为 **0.12.0 产品预览版**：无线画面、单指触控、沉浸全屏与重连已完成真机验证；**音频暂不可用，需要保持应用前台**。
 
+## 下载未签名 HAP
+
+[下载 0.12.0 未签名 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/raw/refs/heads/main/releases/DiPlay-Harmony-0.12.0-unsigned.hap) · [发行说明](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.12.0-preview) · [包校验与使用边界](releases/README.md)
+
+该包从公开脱敏源码构建，**需要自行签名，且不包含实验认证材料**。签名后可查看应用界面；完整无线连接需在本地导入认证材料并重新构建，不能仅靠给本附件签名实现。公开包没有个人设备授权 Profile、用户热点配置或开发者签名。
+
 ## 与 DiPlay 的关联
 
 本工程以 **DiPlay 0.2.12** 的开源实现为协议适配基础，移植并改写其 iAP2、无线引导、配对、加密控制、视频和 HID 触控逻辑。感谢 **shihabal3amri、shilapi 与原项目贡献者**。

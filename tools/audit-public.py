@@ -13,6 +13,9 @@ patterns={
  'messenger-id':re.compile(r'\bwxid_[A-Za-z0-9_]+'),
  'real-signing-config':re.compile(r'"(?:storePassword|keyPassword|storeFile|profile)"\s*:\s*"[^"\n]+"'),
 }
+APPROVED_UNSIGNED_HAPS={
+ 'releases/DiPlay-Harmony-0.12.0-unsigned.hap':'2a2652168e65661e22d863b3838e18d4f0c07bd26c229e253aae1f190bd4d399',
+}
 issues=[];files=[]
 if (ROOT/'.git').exists():
  listing=subprocess.run(['git','ls-files','--cached','--others','--exclude-standard','-z'],cwd=ROOT,capture_output=True,check=True).stdout
@@ -25,6 +28,10 @@ for p in candidates:
  if p.is_symlink():issues.append((rel.as_posix(),'symlink'));continue
  if not p.is_file():continue
  files.append(p)
+ if rel.as_posix() in APPROVED_UNSIGNED_HAPS:
+  if hashlib.sha256(p.read_bytes()).hexdigest()!=APPROVED_UNSIGNED_HAPS[rel.as_posix()]:
+   issues.append((rel.as_posix(),'unreviewed-release-package'))
+  continue
  if p.suffix.lower() in BAD_EXT or (p.name=='local.properties' or rel.as_posix()=='build-profile.json5'):
   issues.append((rel.as_posix(),'excluded-local-artifact'))
  if p.suffix.lower() in {'.pptx','.ppsx'}:

@@ -24,3 +24,4 @@ local.properties
 .env
 .env.*
 /build-profile.json5
+!/releases/DiPlay-Harmony-0.12.0-unsigned.hap
