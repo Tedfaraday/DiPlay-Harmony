@@ -5,6 +5,6 @@ export function diagnosticReport(phase:string,hotspot:string,logs:string,private
   text=text.replace(/\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b/gi,'[设备地址]')
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g,'[网络地址]')
     .replace(/\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b/gi,'[会话标识]');
-  return 'DiPlay Harmony 0.12.0\n连接状态：'+phase+'\n热点状态：'+hotspot+'\n音频：当前版本不可用\n\n'+text;
+  return 'DiPlay Harmony 0.13.11\n连接状态：'+phase+'\n热点状态：'+hotspot+'\n音频：实验版本，手机路由与实际出声待验证\n\n'+text;
 }
 

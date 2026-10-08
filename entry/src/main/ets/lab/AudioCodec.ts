@@ -3,13 +3,33 @@ export class PcmFormat {
   rate:number;channels:number;codec:string;
   constructor(rate:number,channels:number,codec:string='pcm'){this.rate=rate;this.channels=channels;this.codec=codec;}
 }
+// PCM requires one concrete format: even index is mono, odd index is stereo.
+// Capability masks in /info do not establish the format of received PCM samples.
+const PCM_FLAGS=[4,8,16,32,64,128,256,512,1024,2048,16384,32768];
+const PCM_RATES=[8000,8000,16000,16000,24000,24000,32000,32000,44100,44100,48000,48000];
+function singlePcm(bits:number):PcmFormat|undefined{
+  const index=PCM_FLAGS.indexOf(bits);if(index<0){return undefined;}
+  return new PcmFormat(PCM_RATES[index],index%2+1);
+}
+export function pcmBitsAvailable(bits:number,declared:number):boolean{
+  return declared>0&&Number.isInteger(bits)&&bits>0&&(bits&declared)===bits;
+}
+// Match DiPlay's codec-family bit checks, without guessing a format for ambiguous PCM.
 export function pcmFormat(bits:number):PcmFormat{
-  if([0x10000000,0x20000000,0x40000000].includes(bits)){return new PcmFormat(48000,1,'opus');}
-  if(bits===0x400000||bits===0x800000){return new PcmFormat(bits===0x400000?44100:48000,2,'aac');}
-  const flags=[4,8,16,32,64,128,256,512,1024,2048,16384,32768];
-  const rates=[8000,8000,16000,16000,24000,24000,32000,32000,44100,44100,48000,48000];
-  const index=flags.indexOf(bits);if(index<0){throw new Error('尚未支持该音频编码');}
-  return new PcmFormat(rates[index],index%2+1);
+  if(!Number.isInteger(bits)||bits<=0||bits>4294967295){throw new Error('尚未支持该音频编码');}
+  if((bits&0x70000000)!==0&&(bits&0x70000000)===bits){return new PcmFormat(48000,1,'opus');}
+  if((bits&0xc00000)!==0&&(bits&0xc00000)===bits){return new PcmFormat((bits&0x800000)!==0?48000:44100,2,'aac');}
+  const single=singlePcm(bits);if(single){return single;}
+  throw new Error('音频格式不明确或尚未支持');
+}
+// Bounded diagnostic string for a negotiated bit mask: only fixed tokens, never sender text.
+export function describePcmBits(bits:number):string{
+  const names:string[]=[];
+  for(let i=0;i<PCM_FLAGS.length;i++){if(bits&PCM_FLAGS[i]){names.push((i%2+1)+'ch@'+PCM_RATES[i]);}}
+  if(bits&0x400000){names.push('aac44100');}
+  if(bits&0x800000){names.push('aac48000');}
+  for(const opus of [0x10000000,0x20000000,0x40000000]){if(bits&opus){names.push('opus');break;}}
+  return names.length>0?names.join('/'):'none';
 }
 // GPL-3.0-only. ADTS framing follows DiPlay MediaCodecSupport.adtsFrame.
 export function aacAdts(payload:Uint8Array,format:PcmFormat):Uint8Array{

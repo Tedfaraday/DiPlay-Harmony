@@ -2,9 +2,9 @@
 
 **基于 [DiPlay](https://github.com/shihabal3amri/DiPlay) 协议实现的原生 HarmonyOS NEXT 无线 CarPlay 显示接收端。**
 
-让鸿蒙平板接收 iPhone 的 CarPlay 画面，并用平板触控操作。当前为 **0.12.0 产品预览版**：无线画面、单指触控、沉浸全屏与重连已完成真机验证；**音频暂不可用，需要保持应用前台**。
+让鸿蒙平板接收 iPhone 的 CarPlay 画面，并用平板触控操作。当前为 **0.13.11 产品预览版**：无线画面、单指触控、沉浸全屏与重连已完成真机验证；**音频暂不可用，需要保持应用前台**。
 
-## 下载未签名 HAP
+## 历史未签名 HAP
 
 [下载 0.12.0 未签名 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/raw/refs/heads/main/releases/DiPlay-Harmony-0.12.0-unsigned.hap) · [发行说明](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.12.0-preview) · [包校验与使用边界](releases/README.md)
 
@@ -42,7 +42,7 @@
 - 保存连接配置；热点密码默认不持久保存，可选择写入鸿蒙安全资产库。
 - 可选前台断线重试，手动断开、锁屏或进入后台即停止。
 - **音频仍由 iPhone 输出，未完成平板音频路由。** 音频接收/解码基础代码与测试不代表这一功能可用。
-- 锁屏或切换应用会断开；未实现后台连接、多指远程输入、麦克风、通话与 Siri 音频。
+- 锁屏或切换应用会断开；未实现后台连接、多指远程输入；麦克风回传为默认关闭的实验功能，通话与 Siri 音频尚未验证可用。
 - 本机蓝牙地址仍需手动填写；当前热点发现只覆盖 IPv4。
 - 当前开发验证组合：MatePad mini / HarmonyOS 7、iPhone 16 Pro / iOS 27。其他设备兼容性尚待验证，公开 SDK 最低配置不代表已在全部兼容版本验证。
 
@@ -104,3 +104,20 @@ npm run audit:public
 数据在本机保存，诊断由用户主动复制；应用不会自动上传诊断记录。公开快照采用文件白名单重新建立，排除了签名、认证材料、原始日志、设备序列号和本机路径。详见 [隐私与发布检查](docs/PRIVACY.md)。
 
 代码遵循 **GPL-3.0-only**，见 [LICENSE](LICENSE)、[NOTICE](NOTICE.md) 与 [来源映射](docs/UPSTREAM.md)。Material Symbols 介绍图标遵循 Apache-2.0。CarPlay 名称与界面属于 Apple；本项目并非 Apple 官方认证产品。
+
+## 0.13.11 更新
+
+- 修正视频接收队列：按字节限制归并 TCP 分片，分批解析后继续消费剩余包，保留顺序认证与关闭清理。
+- 对齐 CarPlay 控制服务发现名称，以及等待手机指令和 Wi-Fi iAP2 认证的蓝牙交接时机。
+- 收紧音频格式与流类型校验，补充麦克风权限申请和默认关闭的回传实验开关。
+- 新增受限的协商诊断：只记录白名单字段存在性、消息类型和计数，不输出原始协议载荷。
+- 22 个测试文件、185 项检查通过。完整本地版本的约 98 秒会话中画面与触控流畅，未见队列超限或自动重连；此结果不代表长时间稳定性已经完成验证。
+- **音频仍未解决**：手机仍播放音乐，没有新增输出设备，30 秒观察未收到音频 SETUP。公开未签名包不含认证材料，不能直接复现完整本地连接。
+
+详细发布说明见 [0.13.11](docs/releases/0.13.11.md)。介绍 PPT 为此前的 0.12.0 介绍，最新状态以本页和 Release 为准。
+
+## 当前未签名安装包
+
+[0.13.11 Release](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.13.11-preview) · [下载 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/releases/download/v0.13.11-preview/DiPlay-Harmony-0.13.11-unsigned.hap)
+
+未签名且不含认证材料，不能直接安装或完整连接；请先阅读 Release 的本地签名与认证导入边界。

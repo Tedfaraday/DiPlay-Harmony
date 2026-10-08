@@ -9,6 +9,23 @@ check('CSM and parameter lengths are big-endian and include headers',()=>{
   const p=parameter(0,Uint8Array.of(1,2));assert.deepEqual(Array.from(p),[0,6,0,0,1,2]);
   assert.deepEqual(Array.from(controlMessage(0xaa03,[p])),[64,64,0,12,170,3,0,6,0,0,1,2]);
 });
+check('iAP diagnostics decode only known availability and transport presence, without identifiers',()=>{
+ const d=new exportsObject.IapControlDiagnostics(),body=controlMessage(0,[parameter(0,Uint8Array.of(1))]).slice(6);
+ assert.equal(d.observe(0x4e0d,body),'id=0x4e0d,wirelessUpdate=yes');assert.equal(d.observe(0x4e0d,body),'');
+ assert.match(d.observe(0x4e0d,parameter(0,Uint8Array.of(0))),/wirelessUpdate=no/);
+ const nested=parameter(1,controlMessage(0,[parameter(0,Uint8Array.of(1)),parameter(1,new TextEncoder().encode('secret-device'))]).slice(6));
+ assert.equal(d.observe(0x4300,nested),'id=0x4300,wired=absent,wireless=yes,themeAssets=absent');
+ const transport=controlMessage(0,[parameter(0,new TextEncoder().encode('AA:BB:CC:DD:EE:FF')),parameter(1,new TextEncoder().encode('private-serial'))]).slice(6);
+ assert.equal(d.observe(0x4e0e,transport),'id=0x4e0e,transportBluetoothPresent=yes,transportUsbPresent=yes');
+ assert.equal(d.observe(0x5001,new TextEncoder().encode('secret-song')),'id=0x5001,unhandled,bytes=11');
+});
+check('iAP observations cannot throw on malformed TLVs and stop at a fixed report bound',()=>{
+ const d=new exportsObject.IapControlDiagnostics();assert.match(d.observe(0x4e0d,Uint8Array.of(0)),/invalidDiagnosticFields/);
+ assert.match(d.observe(0x4e0d,parameter(0,Uint8Array.of(2))),/invalid/);
+ assert.equal(d.observe(-1,new Uint8Array(0)),'');assert.equal(d.observe(65536,new Uint8Array(0)),'');
+ const bounded=new exportsObject.IapControlDiagnostics();for(let i=0;i<24;i++)assert.ok(bounded.observe(0x6000+i,new Uint8Array(0)));
+ assert.equal(bounded.observe(0x6100,new Uint8Array(0)),'');
+});
 check('required identification fields use terminated UTF8 and supported message IDs',()=>{
   const bytes=identification('test-serial',s=>new TextEncoder().encode(s));
   assert.equal(bytes.length,bytes[2]*256+bytes[3]);const body=bytes.slice(6);

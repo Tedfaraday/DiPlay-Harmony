@@ -9,7 +9,7 @@ function open(k,n,d,a){const c=crypto.createDecipheriv('chacha20-poly1305',k,n,{
 function packet(key,counter,sample,pcm){const head=Buffer.alloc(12),nonce=Buffer.alloc(12);head[0]=128;head[1]=96;head.writeUInt16BE(Number(counter%65536n),2);head.writeUInt32BE(sample>>>0,4);head.writeUInt32BE(987,8);nonce.writeBigUInt64LE(counter,4);return Buffer.concat([head,seal(key,nonce,pcm,head.subarray(4)),nonce.subarray(4)]);}
 function fixture(bits=32768,type=100){let ms=0,port=35000,createGate,bindGate;const endpoints=[],renderers=[],reports=[],timers=[];
 class Endpoint{handlers={};closed=false;port=port++;on(n,h){this.handlers[n]=h;}emit(n,x){this.handlers[n]?.(x);}async bind(){if(bindGate)await bindGate.promise;this.bound=true;}async setExtraOptions(){}async getLocalAddress(){return{port:this.port};}async close(){this.closed=true;}}
-class Renderer{handlers={};started=false;released=false;on(n,h){this.handlers[n]=h;}off(n){delete this.handlers[n];}async start(){this.started=true;}async stop(){this.started=false;}async release(){this.released=true;}}
+class Renderer{handlers={};started=false;released=false;on(n,h){this.handlers[n]=h;}off(n){delete this.handlers[n];}async getCurrentOutputDevices(){return [{deviceType:2,displayName:"private device"}];}async start(){this.started=true;}async stop(){this.started=false;}async release(){this.released=true;}}
 const audio={createAudioRenderer:async(options)=>{const r=new Renderer();r.options=options;renderers.push(r);if(createGate)await createGate.promise;return r;},AudioSampleFormat:{SAMPLE_FORMAT_S16LE:1},AudioEncodingType:{ENCODING_TYPE_RAW:0},StreamUsage:{STREAM_USAGE_MUSIC:1},AudioDataCallbackResult:{VALID:0,INVALID:-1}};
 const native={packets:[],outputs:[],stopped:false,startAudio:(rate,channels,kind)=>{assert.equal(rate,48000);assert.equal(channels,codec.pcmFormat(bits).channels);assert.equal(kind,codec.pcmFormat(bits).codec);return 7;},feedAudio:(id,data,ptsUs)=>{assert.equal(id,7);native.packets.push({data,ptsUs});return true;},readAudio:()=>native.outputs.shift(),stopAudio:()=>{native.stopped=true;}};
 const bridge=load('AudioDecodeBridge',{'libdiplayvideo.so':{default:native},'./AudioCodec':codec},'.ets');
@@ -25,7 +25,7 @@ const key=crypto.randomBytes(32),wire=packet(key,33n,0xfffffff0,Buffer.from([0x1
 assert.equal(p.sample,0xfffffff0);assert.equal(p.counter,33n);assert.deepEqual(Buffer.from(codec.pcmLittleEndian(open(key,p.nonce,p.sealed,p.aad),2)),Buffer.from([0x34,0x12,0xcd,0xab]));
 assert.equal(window.accepts(33n),true);const corrupt=new codec.AudioPacket(Buffer.from(wire));corrupt.aad[0]^=1;assert.throws(()=>open(key,corrupt.nonce,corrupt.sealed,corrupt.aad));assert.equal(window.accepts(33n),true);
 window.commit(33n);assert.equal(window.accepts(33n),false);window.commit(31n);window.commit(400n);assert.equal(window.accepts(33n),false);assert.equal(window.accepts(399n),true);
-assert.throws(()=>new codec.AudioPacket(new Uint8Array(37)));assert.throws(()=>codec.pcmFormat(0x70000000));assert.throws(()=>codec.pcmLittleEndian(new Uint8Array(3),1));
+assert.throws(()=>new codec.AudioPacket(new Uint8Array(37)));assert.throws(()=>codec.pcmFormat(0x7000c3fc));assert.throws(()=>codec.pcmLittleEndian(new Uint8Array(3),1));
 });
 await check('jitter queue reorders across RTP timestamp wrap, inserts silence for loss and trims late samples',()=>{
 const q=new codec.PcmJitterBuffer(codec.pcmFormat(4));q.push(0,Uint8Array.of(5,6,7,8));q.push(0xfffffffe,Uint8Array.of(1,2,3,4));const target=new Uint8Array(8);assert.equal(q.fill(target,true),8);assert.deepEqual([...target],[1,2,3,4,5,6,7,8]);
@@ -38,11 +38,14 @@ for(let i=0;i<100;i++)q.push(5000+i*100,new Uint8Array(200));assert.ok(q.queuedB
 });
 await check('renderer receives authenticated PCM only, fills entire callback, and releases all resources',async()=>{
 const f=fixture(),setup=await f.server.start();assert.equal(setup.entries.get('dataPort').number(),35000);assert.equal(setup.entries.get('controlPort').number(),35001);assert.equal(setup.entries.get('streamConnectionID').integer,0xffffffffffffffffn);
+let micStarts=0,micCloses=0;f.server.microphone={start:async()=>{micStarts++;},close:async()=>{micCloses++;}};
 const raw=Buffer.from([0x12,0x34,0xab,0xcd]),valid=packet(f.key,0n,1000,raw),bad=Buffer.from(valid);bad[13]^=1;f.emit(bad);await tick();assert.equal(f.renderers[0].started,false);
 f.emit(valid);await tick();await tick();assert.equal(f.renderers[0].started,true);f.setTime(60);const buffer=new ArrayBuffer(16);new Uint8Array(buffer).fill(255);assert.equal(f.renderers[0].handlers.writeData(buffer),0);
 assert.deepEqual([...new Uint8Array(buffer)],[0x34,0x12,0xcd,0xab,...new Array(12).fill(0)]);f.emit(valid);await tick();assert.equal(f.server.packets,1);
+assert.equal(micStarts,1);assert.ok(f.reports.every(m=>!m.includes('private device')));
 const feedback=f.server.feedback({ntp:()=>123n});assert.equal(feedback.entries.get('sampleTime').number(),2440);assert.equal(feedback.entries.get('timestamp').integer,123n);
 assert.ok(f.reports.every(m=>!m.includes('1234')&&!m.includes('abcd')));await f.server.close();assert.ok(f.endpoints.every(e=>e.closed));assert.equal(f.renderers[0].released,true);assert.ok(f.server.key.every(n=>n===0));
+assert.equal(micCloses,1);
 });
 await check('stop during renderer creation releases late renderer without binding UDP',async()=>{
 const f=fixture(),gate=deferred();f.setCreateGate(gate);const pending=f.server.start();await tick();await f.server.close();gate.resolve();await assert.rejects(pending,/关闭/);assert.equal(f.endpoints.length,0);assert.equal(f.renderers[0].released,true);

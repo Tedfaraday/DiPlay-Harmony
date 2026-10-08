@@ -21,6 +21,7 @@ const control = load('../entry/src/main/ets/lab/Iap2Control.ts', {});
 const wireless = load('../entry/src/main/ets/lab/WirelessControl.ts', {'./Iap2Control':control});
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 function fixture() {
+  const permissions={status:1,requests:0,settings:0};
   const servers = [], udps = [], btClosed = [], btWrites = [];
   let btCallback, btRead, sessionEvent, sessionStopped=0;
   class Endpoint {
@@ -43,7 +44,9 @@ function fixture() {
   };
   const modules = {
     '@kit.PerformanceAnalysisKit':{hilog:{info(){}}},
-    '@kit.AbilityKit': { abilityAccessCtrl: { createAtManager: () => ({ requestPermissionsFromUser: async () => ({ authResults: [0] }) }) } },
+    '@kit.AbilityKit': { abilityAccessCtrl: { createAtManager: () => ({getSelfPermissionStatus:()=>permissions.status,
+      requestPermissionsFromUser: async () => {permissions.requests++;permissions.status=0;return {authResults:[0],dialogShownResults:[true]};},
+      requestPermissionOnSetting:async()=>{permissions.settings++;permissions.status=0;return [0];}}) } },
     '@kit.ConnectivityKit': {
       wifiManager: { on() {}, off() {}, isHotspotActive: () => true },
       connection: { getPairedDevices: () => [], getRemoteDeviceName: () => '' },
@@ -60,7 +63,7 @@ function fixture() {
   };
   const { LabController } = load('../entry/src/main/ets/lab/LabController.ets', modules);
   const controller = new LabController();
-  return { controller, servers, udps, btClosed, btWrites, Endpoint, modules, sessionEvent:event=>sessionEvent(event), sessionStopped:()=>sessionStopped,
+  return { controller, servers, udps, btClosed, btWrites, Endpoint, modules, permissions, sessionEvent:event=>sessionEvent(event), sessionStopped:()=>sessionStopped,
     connected: (error, id) => btCallback(error, id), read: bytes => btRead(Uint8Array.from(bytes).buffer) };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -192,6 +195,46 @@ async function check(name, fn) { await fn(); tests++; console.log(`PASS ${name}`
     const stops=f.sessionStopped();f.connected({code:1,message:'synthetic failure'},-1);
     assert.equal(f.controller.state.phase,'error');assert.equal(f.controller.connectionTimer,-1);assert.ok(f.sessionStopped()>stops);
     f.sessionEvent('streaming');assert.equal(f.controller.state.phase,'error');assert.match(f.controller.state.connectionError,/蓝牙配对/);f.controller.dispose();
+  });
+  await check('microphone permission is explicitly requested before enabling; toggle alone cannot trigger permission dialog',async()=>{
+    const f=fixture();f.controller.attach({},()=>{});assert.equal(f.controller.microphoneEnabled,false);
+    assert.equal(await f.controller.enableMicrophone(true),false);
+    assert.equal(f.permissions.requests,0);assert.equal(await f.controller.requestMicrophonePermission(),true);
+    assert.equal(f.permissions.requests,1);assert.equal(f.controller.microphoneEnabled,false);assert.equal(f.controller.state.microphonePermission,'已允许');
+    assert.equal(await f.controller.enableMicrophone(true),true);assert.equal(f.controller.state.microphoneEnabled,true);
+    assert.equal(await f.controller.enableMicrophone(false),false);f.controller.dispose();
+  });
+  await check('already granted permission is queried without requesting again; revocation clears experiment on foreground',async()=>{
+    const f=fixture();f.permissions.status=0;f.controller.attach({},()=>{});assert.equal(await f.controller.requestMicrophonePermission(),true);assert.equal(f.permissions.requests,0);
+    await f.controller.enableMicrophone(true);f.controller.setForeground(false);f.permissions.status=-1;f.controller.setForeground(true);
+    assert.equal(f.controller.state.microphoneGranted,false);assert.equal(f.controller.microphoneEnabled,false);f.controller.dispose();
+  });
+  await check('denied permission exposes status; settings retry requires explicit action and can grant permission',async()=>{
+    const f=fixture();f.controller.attach({},()=>{});f.permissions.status=-1;
+    const base=f.modules['@kit.AbilityKit'].abilityAccessCtrl.createAtManager;
+    f.modules['@kit.AbilityKit'].abilityAccessCtrl.createAtManager=()=>({...base(),requestPermissionsFromUser:async()=>({authResults:[-1],dialogShownResults:[false],errorReasons:[0]})});
+    assert.equal(await f.controller.requestMicrophonePermission(),false);assert.equal(f.permissions.settings,0);assert.equal(f.controller.state.microphonePermission,'未允许');
+    assert.equal(await f.controller.requestMicrophonePermission(true),true);assert.equal(f.permissions.settings,1);assert.equal(await f.controller.enableMicrophone(true),true);f.controller.dispose();
+  });
+  await check('permission dialog lifecycle does not discard granted status; duplicate request is suppressed',async()=>{
+    const f=fixture();f.controller.attach({},()=>{});const pending=deferred();let requests=0;
+    f.modules['@kit.AbilityKit'].abilityAccessCtrl.createAtManager=()=>({getSelfPermissionStatus:()=>f.permissions.status,requestPermissionsFromUser:async()=>{requests++;await pending.promise;f.permissions.status=0;return {authResults:[0],dialogShownResults:[true]};}});
+    const result=f.controller.requestMicrophonePermission();assert.equal(f.controller.state.microphonePermissionBusy,true);assert.equal(await f.controller.requestMicrophonePermission(),false);assert.equal(requests,1);
+    f.controller.setForeground(false);pending.resolve();assert.equal(await result,true);assert.equal(f.controller.state.microphonePermissionBusy,false);assert.equal(f.controller.microphoneEnabled,false);
+    assert.equal(await f.controller.enableMicrophone(true),false);f.controller.setForeground(true);assert.equal(await f.controller.enableMicrophone(true),true);f.controller.dispose();
+  });
+  await check('authorization errors expose numeric reason and release busy state; late permission after destruction cannot enable capture',async()=>{
+    const f=fixture();f.controller.attach({},()=>{});
+    f.modules['@kit.AbilityKit'].abilityAccessCtrl.createAtManager=()=>({getSelfPermissionStatus:()=>1,requestPermissionsFromUser:async()=>{throw {code:12100009,message:'private detail'};}});
+    assert.equal(await f.controller.requestMicrophonePermission(),false);assert.equal(f.controller.state.microphonePermissionBusy,false);
+    assert.ok(f.controller.state.logs.some(m=>m.includes('12100009')));assert.ok(f.controller.state.logs.every(m=>!m.includes('private detail')));
+    const g=fixture(),pending=deferred();g.controller.attach({},()=>{});
+    g.modules['@kit.AbilityKit'].abilityAccessCtrl.createAtManager=()=>({getSelfPermissionStatus:()=>1,requestPermissionsFromUser:()=>pending.promise});
+    const request=g.controller.requestMicrophonePermission();g.controller.dispose();pending.resolve({authResults:[0]});assert.equal(await request,false);assert.equal(g.controller.microphoneEnabled,false);f.controller.dispose();
+  });
+  await check('turning microphone off during active session disconnects immediately rather than leaving capture active',async()=>{
+    const f=fixture();f.permissions.status=0;f.controller.attach({},()=>{});await f.controller.enableMicrophone(true);f.controller.state.phase='connected';
+    const stopped=f.sessionStopped();await f.controller.enableMicrophone(false);assert.equal(f.controller.state.phase,'idle');assert.ok(f.sessionStopped()>stopped);assert.equal(f.controller.state.microphoneEnabled,false);f.controller.dispose();
   });
   console.log(`${tests} controller tests passed`);
 })().catch(error => { console.error(error); process.exitCode = 1; });

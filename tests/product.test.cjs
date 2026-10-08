@@ -81,7 +81,7 @@ const tick=()=>new Promise(r=>setImmediate(r));
   await check('diagnostic report redacts literal metacharacters, names, addresses and UUIDs',()=>{
     const secret='pa$$[word].*';const report=diagnosticReport('已连接','已开启',`safe command 200\n${secret}\nTest phone\nAA:BB:CC:DD:EE:FF\n192.168.43.1\n12345678-1234-1234-1234-123456789abc`,[secret,'Test phone']);
     for(const value of [secret,'Test phone','AA:BB:CC:DD:EE:FF','192.168.43.1','12345678-1234-1234-1234-123456789abc'])assert.ok(!report.includes(value));
-    assert.ok(report.includes('safe command 200'));assert.ok(report.includes('音频：当前版本不可用'));
+    assert.ok(report.includes('safe command 200'));assert.ok(report.includes('手机路由与实际出声待验证'));
   });
   await check('both application and video are immersive; background restores bars, back and screen settings',async()=>{
     const calls=[];const {Presentation}=load('Presentation',{'@kit.PerformanceAnalysisKit':{hilog:{info(){},warn(){}}},'@kit.ArkUI':{window:{Orientation:{AUTO_ROTATION_LANDSCAPE:7,AUTO_ROTATION_UNSPECIFIED:12}}}},'.ets');

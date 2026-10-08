@@ -26,7 +26,20 @@ const request=c.request(),reply=c.handle(request);assert.equal(reply[1],211);ass
 await check('native session binds real timing/event/keepalive ports and closes all resources',async()=>{
 const f=fixture();const r=await f.resources.start({address:'192.168.43.2',port:7000,family:1},6000,true,crypto.randomBytes(32),f.native);
 assert.equal(r.entries.get('timingPort').number(),29000);assert.equal(r.entries.get('eventPort').number(),29001);assert.equal(r.entries.get('keepAlivePort').number(),29002);
+// The initial SETUP reply must negotiate session features: viewAreas always, iAPChannel only on the
+// CarPlay Wi-Fi path, exactly as the reference receiver builds it.
+assert.deepEqual([...r.entries.keys()],['timingPort','eventPort','enabledFeatures','keepAlivePort']);
 assert.equal(f.endpoints[0].sent.length,1);assert.equal(f.endpoints[0].sent[0].address.port,6000);await f.resources.close();assert.ok(f.endpoints.every(e=>e.closed));
+});
+await check('initial SETUP negotiates iAPChannel only when the iAP session is active',async()=>{
+ const withIap=fixture();const a=await withIap.resources.start({address:'192.168.43.2',port:7000,family:1},0,false,crypto.randomBytes(32),withIap.native,true);
+ assert.deepEqual([...a.entries.keys()],['timingPort','eventPort','enabledFeatures']);
+ assert.deepEqual([...a.entries.get('enabledFeatures').items].map(x=>x.text),['iAPChannel','viewAreas']);
+ await withIap.resources.close();
+ const without=fixture();const b=await without.resources.start({address:'192.168.43.2',port:7000,family:1},0,false,crypto.randomBytes(32),without.native,false);
+ assert.deepEqual([...b.entries.get('enabledFeatures').items].map(x=>x.text),['viewAreas']);
+ assert.equal(b.entries.has('keepAlivePort'),false);
+ await without.resources.close();
 });
 await check('stop during UDP bind cannot leave a late socket or create event server',async()=>{
 const f=fixture(),gate=deferred();f.setBindGate(gate);const pending=f.resources.start({address:'192.168.43.2',port:7000,family:1},6000,false,crypto.randomBytes(32),f.native);

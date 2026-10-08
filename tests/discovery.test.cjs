@@ -8,14 +8,14 @@ const tick=()=>new Promise(r=>setImmediate(r)),deferred=()=>{let resolve;const p
 function fixture(useHotspot=false){const published=[],removed=[],clients=[],reports=[],hotspots=[];let addGate,bindGate;
 const discovery={handlers:{},on(n,h){this.handlers[n]=h;},off(n){delete this.handlers[n];},startSearchingMDNS(){this.started=true;},stopSearchingMDNS(){this.stopped=true;}};
 class Client{handlers={};sent=[];on(n,h){this.handlers[n]=h;}emit(n,data){this.handlers[n]?.(data);}async bind(o){this.binding=o;if(bindGate)await bindGate.promise;}async connect(o){this.connected=o;}async send(o){this.sent.push(o);}async close(){this.closed=true;this.emit('close');}}
-const mdns={addLocalService:async(ctx,s)=>{published.push(s);if(addGate)await addGate.promise;return s;},removeLocalService:async(ctx,s)=>{removed.push(s);},createDiscoveryService:()=>discovery,resolveLocalService:async(ctx,s)=>s};
+const mdns={addLocalService:async(ctx,s)=>{published.push(s);if(addGate)await addGate.promise;return s;},removeLocalService:async(ctx,s)=>{removed.push(s);},createDiscoveryService:(ctx,type)=>{discovery.type=type;return discovery;},resolveLocalService:async(ctx,s)=>s};
 const {AirPlayDiscovery}=load('AirPlayDiscovery',{'@kit.NetworkKit':{mdns,socket:{constructTCPSocketInstance:()=>{const c=new Client();clients.push(c);return c;}}},'@kit.ArkTS':{util:{TextEncoder:class{encodeInto(s){return new TextEncoder().encode(s);}},TextDecoder:{create:()=>({decodeToString:b=>new TextDecoder().decode(b)})}}},'./ReceiverInfo':receiver,'./HotspotMdns':{HotspotMdns:class{constructor(address,deviceId,report,resolve){Object.assign(this,{address,deviceId,resolve});hotspots.push(this);}start(){if(!useHotspot)throw new Error('test system fallback');}approvePeer(address){this.approved=address;}close(){this.closed=true;}}}},'.ets');
 return{service:new AirPlayDiscovery({},'00:11:22:33:44:55',m=>reports.push(m),'192.168.43.1'),published,removed,clients,reports,discovery,hotspots,setAddGate:g=>addGate=g,setBindGate:g=>bindGate=g,found:s=>discovery.handlers.serviceFound(s)};}
 let count=0;async function check(name,fn){await fn();count++;console.log('PASS '+name);}
 (async()=>{
 await check('AirPlay discovery TXT features match info and publish only the public receiver identity',async()=>{
 const f=fixture();await f.service.start(identity);const attrs=Object.fromEntries(f.published[0].serviceAttribute.map(a=>[a.key,new TextDecoder().decode(Uint8Array.from(a.value))]));
-assert.equal(f.published[0].serviceType,'_airplay._tcp');assert.equal(f.published[0].port,7000);assert.equal(attrs.features,'0x5653aee2,0x61');assert.equal(attrs.pk,'07'.repeat(32));assert.equal(attrs.pi,'public-pairing-id');assert.equal(f.discovery.started,true);
+assert.equal(f.published[0].serviceType,'_airplay._tcp');assert.equal(f.published[0].port,7000);assert.equal(attrs.features,'0x5653aee2,0x61');assert.equal(attrs.pk,'07'.repeat(32));assert.equal(attrs.pi,'public-pairing-id');assert.equal(f.discovery.started,true);assert.equal(f.discovery.type,'_carplay-ctrl._tcp');
 const mac='00:11:22:33:44:55',info=receiver.receiverInfo(mac);
 const start=wireless.startWirelessSession(new wireless.WirelessSettings('test','password','192.168.43.1'),mac,attrs.pk,s=>new TextEncoder().encode(s));
 assert.equal(attrs.deviceid,info.entries.get('deviceID').text);

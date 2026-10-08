@@ -8,11 +8,11 @@ const encode=s=>new TextEncoder().encode(s),decode=b=>new TextDecoder().decode(b
 const short=n=>{const b=Buffer.alloc(2);b.writeUInt16BE(n);return b;},long=n=>{const b=Buffer.alloc(4);b.writeUInt32BE(n);return b;};
 const name=labels=>Buffer.concat([...labels.map(s=>{const b=Buffer.from(s);return Buffer.concat([Buffer.from([b.length]),b]);}),Buffer.from([0])]);
 const pointer=n=>short(0xc000|n),rr=(owner,type,data,ttl=120,flush=true)=>Buffer.concat([owner,short(type),short(flush?0x8001:1),long(ttl),short(data.length),data]);
-const browse=['_carplay','_tcp','local'],instance=['TestPhone',...browse],host=['iphone','local'];
+const browse=['_carplay-ctrl','_tcp','local'],instance=['CDX.iPhone',...browse],host=['iphone','local'];
 function response(records){return Buffer.concat([short(0),short(0x8400),short(0),short(records.length),short(0),short(0),...records]);}
 function compressed(){
- const base=name(browse),target=Buffer.concat([name(['TestPhone']).subarray(0,-1),pointer(12)]),targetOffset=12+base.length+10;
- const ptr=rr(base,12,target,120,false),srvBody=Buffer.concat([short(0),short(0),short(12345),name(['iphone']).subarray(0,-1),pointer(12+9+5)]);
+ const base=name(browse),target=Buffer.concat([name(['CDX.iPhone']).subarray(0,-1),pointer(12)]),targetOffset=12+base.length+10;
+ const ptr=rr(base,12,target,120,false),srvBody=Buffer.concat([short(0),short(0),short(12345),name(['iphone']).subarray(0,-1),pointer(12+name(browse.slice(0,2)).length-1)]);
  const hostOffset=12+ptr.length+2+10+6;
  const srv=rr(pointer(targetOffset),33,srvBody),address=rr(pointer(hostOffset),1,Buffer.from([192,168,43,2]));
  return response([ptr,srv,address]);
@@ -37,7 +37,7 @@ check('independent compressed PTR/SRV/A decodes; instance dot stays in a single 
  assert.equal(packet.records[1].port,12345);assert.deepEqual(Array.from(packet.records[1].target.labels),host);assert.equal(packet.records[2].address,'192.168.43.2');
 });
 check('DNS queries use QU flag and UTF8 labels; probe records belong in authority section',()=>{
- const packet=new dns.DnsPacket();packet.questions=[new dns.DnsQuestion(new dns.DnsName(['设备.甲','_carplay','_tcp','local']))];
+ const packet=new dns.DnsPacket();packet.questions=[new dns.DnsQuestion(new dns.DnsName(['设备.甲',...browse]))];
  const wire=Buffer.from(dns.writeDns(packet,encode));assert.equal(wire.readUInt16BE(4),1);assert.equal(wire.readUInt16BE(wire.length-2),0x8001);
  const length=wire[12];assert.equal(wire.subarray(13,13+length).toString(),'设备.甲');
  const f=fixture();f.start();assert.equal(f.sent[0].data.readUInt16BE(6),0);assert.equal(f.sent[0].data.readUInt16BE(8),3);
@@ -61,7 +61,7 @@ check('three name probes precede announcement; discovery TXT matches info, and s
 check('control resolution waits for authentication and verifies advertised address; packets from other phones cannot resolve',()=>{
  const f=fixture();f.ready();f.emit(compressed());f.emit(compressed(),'192.168.43.3');f.pump(800);assert.equal(f.resolved.length,0);
  f.service.approvePeer('192.168.43.2');assert.deepEqual(f.resolved,[{address:'192.168.43.2',port:12345}]);
- f.emit(compressed());f.pump(900);assert.equal(f.resolved.length,1);assert.ok(f.reports.every(m=>!m.includes('TestPhone')&&!m.includes('192.168')));f.service.close();
+ f.emit(compressed());f.pump(900);assert.equal(f.resolved.length,1);assert.ok(f.reports.every(m=>!m.includes('CDX')&&!m.includes('192.168')));f.service.close();
 });
 check('fragmented discovery records trigger SRV and A followups only to authenticated phone',()=>{
  const f=fixture();f.ready();f.service.approvePeer('192.168.43.2');f.emit(ptr());f.pump(800);
@@ -69,6 +69,14 @@ check('fragmented discovery records trigger SRV and A followups only to authenti
  f.emit(srv());f.pump(900);assert.ok(f.sent.some(s=>s.address==='192.168.43.2'&&dns.readDns(s.data,decode).questions.some(q=>q.type===1)));
  f.emit(addr([192,168,43,3]));f.pump(950);assert.equal(f.resolved.length,0);
  f.emit(addr());f.pump(1000);assert.equal(f.resolved.length,1);assert.ok(f.sent.every(s=>!s.address||s.address==='192.168.43.2'));f.service.close();
+});
+check('browse requests target CarPlay control service and ignore legacy service responses',()=>{
+ const f=fixture();f.ready();f.service.approvePeer('192.168.43.2');
+ assert.ok(f.sent.some(s=>dns.readDns(s.data,decode).questions.some(q=>q.type===12&&Array.from(q.name.labels).join('.')==='_carplay-ctrl._tcp.local')));
+ const legacy=['_carplay','_tcp','local'],legacyInstance=['CDX.iPhone',...legacy];
+ f.emit(response([rr(name(legacy),12,name(legacyInstance),120,false),rr(name(legacyInstance),33,Buffer.concat([short(0),short(0),short(12345),name(host)])),rr(name(host),1,Buffer.from([192,168,43,2]))]));
+ f.pump(800);assert.equal(f.resolved.length,0);
+ f.emit(compressed());f.pump(900);assert.equal(f.resolved.length,1);f.service.close();
 });
 check('stale records, unsolicited unicast responses, and malformed datagrams cannot create a control endpoint',()=>{
  const f=fixture();f.ready();f.emit(compressed());f.pump(800);f.pump(121000);f.service.approvePeer('192.168.43.2');assert.equal(f.resolved.length,0);

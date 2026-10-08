@@ -44,6 +44,10 @@ struct Index {
   @State private videoHeight:number=360;
   @State private reportText:string='';
   @State private displayText:string='自动读取屏幕尺寸';
+  @State private microphoneEnabled:boolean=false;
+  @State private microphonePermission:string='尚未检查';
+  @State private microphoneGranted:boolean=false;
+  @State private microphonePermissionBusy:boolean=false;
   private displayProfile:DisplayProfile=new DisplayProfile();
   private areaWidth:number=640;private areaHeight:number=360;
   private logs:string='';
@@ -65,6 +69,8 @@ struct Index {
     this.lab.attach(context,(state:LabState):void=>{
       const previous=this.phase;this.phase=state.phase;this.hotspot=state.hotspot;
       this.bluetooth=state.bluetooth;this.session=state.session;this.devices=state.devices.slice();
+      this.microphoneEnabled=state.microphoneEnabled;this.microphonePermission=state.microphonePermission;
+      this.microphoneGranted=state.microphoneGranted;this.microphonePermissionBusy=state.microphonePermissionBusy;
       this.logs=state.logs.slice().join('\n');
       if(state.connectionError){this.error=state.connectionError;}
       if(!state.foreground){this.operation++;this.cancelRetry();this.retryNotice='';this.setFullscreen(false);this.busy=false;}
@@ -298,6 +304,28 @@ struct Index {
       Button('保存连接配置').width('100%').height(50).backgroundColor(M3.primary).fontColor(M3.onPrimary)
         .enabled(this.canEdit()).onClick(async():Promise<void>=>{
           this.busy=true;try{await this.saveProfile();this.applyPresentation();}finally{this.busy=false;}})
+      Column({space:10}){
+        this.sectionTitle('音频实验','用于验证 iPhone 的音频协商；音乐输出仍待真机确认。')
+        Text('麦克风权限：'+this.microphonePermission).fontSize(14).fontColor(M3.primary)
+        Row({space:12}){
+          Button(this.microphonePermissionBusy?'正在处理授权…':this.microphoneGranted?'检查麦克风权限':'申请麦克风权限')
+            .backgroundColor(M3.primary).fontColor(M3.onPrimary).enabled(!this.microphonePermissionBusy&&!this.loading)
+            .onClick(async():Promise<void>=>{await this.lab.requestMicrophonePermission();})
+          if(!this.microphoneGranted){Button('权限设置').backgroundColor(M3.secondaryContainer).fontColor(M3.onSurface)
+            .enabled(!this.microphonePermissionBusy&&!this.loading)
+            .onClick(async():Promise<void>=>{await this.lab.requestMicrophonePermission(true);})}
+        }
+        Row({space:16}){
+          Column({space:4}){Text('允许麦克风回传').fontSize(15).fontColor(M3.onSurface)
+            Text('仅本次运行有效。手机请求语音通道时采集并加密发送；断开或进入后台即停止，不保存录音。').fontSize(12).fontColor(M3.onSurfaceVariant).lineHeight(19)
+          }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Toggle({type:ToggleType.Switch,isOn:this.microphoneEnabled}).selectedColor(M3.primary)
+            .enabled(this.microphoneGranted&&!this.microphonePermissionBusy&&!this.loading)
+            .onChange(async(value:boolean):Promise<void>=>{await this.lab.enableMicrophone(value);})
+        }.width('100%').padding({top:8,bottom:8})
+        Text('开启后重新连接生效。拒绝权限仍可使用画面与触控；当前仅试验 PCM 语音，不代表通话或 Siri 已验证。')
+          .fontSize(12).fontColor(M3.onSurfaceVariant).lineHeight(20)
+      }.width('100%').alignItems(HorizontalAlign.Start)
       Button('清除本机连接配置').backgroundColor(M3.secondaryContainer).fontColor(M3.onSurfaceVariant).enabled(!this.busy).onClick(():void=>{this.resetProfile();})
     }.width('100%').constraintSize({maxWidth:760}).padding(24).alignItems(HorizontalAlign.Start)}.width('100%').height('100%').backgroundColor(M3.surface)
   }
@@ -319,7 +347,7 @@ struct Index {
   aboutPage(){
     Scroll(){Column({space:20}){
       Text('DiPlay Harmony').fontSize(32).fontWeight(FontWeight.Bold).fontColor(M3.onSurface)
-      Text('0.12.0 · 产品预览版').fontSize(14).fontColor(M3.primary)
+      Text('0.13.11 · 产品预览版').fontSize(14).fontColor(M3.primary)
       this.sectionTitle('让平板成为 CarPlay 显示屏','通过平板热点接收 iPhone 的画面，使用平板触控操作 CarPlay。')
       Column({space:14}){
         Text('首次使用').fontSize(20).fontWeight(FontWeight.Bold).fontColor(M3.onSurface)
@@ -367,7 +395,7 @@ struct Index {
         Column({space:14}){
           this.navButton($r('app.media.nav_screen'),'连接',0);this.navButton($r('app.media.nav_settings'),'设置',1)
           this.navButton($r('app.media.nav_diagnostics'),'诊断',2);this.navButton($r('app.media.nav_info'),'关于',3)
-          Blank();Text('0.12.0').fontSize(10).fontColor(M3.outline)
+          Blank();Text('0.13.11').fontSize(10).fontColor(M3.outline)
         }.width(94).height('100%').padding({top:18,bottom:24}).backgroundColor(M3.surface).visibility(this.fullscreen?Visibility.None:Visibility.Visible)
         Column(){
           Row({space:12}){

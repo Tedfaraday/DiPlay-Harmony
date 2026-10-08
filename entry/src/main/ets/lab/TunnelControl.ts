@@ -1,12 +1,13 @@
 // GPL-3.0-only. Minimal independent iAP2 runtime over the CarPlay Wi-Fi data stream.
 import { Iap2Link, CsmObserver } from './Iap2Link';
-import { controlMessage, identification, parameter, readParameters, parameterIds } from './Iap2Control';
+import { controlMessage, identification, parameter, readParameters, parameterIds, IapControlDiagnostics } from './Iap2Control';
 import { WirelessSettings, wirelessComponent, wifiConfiguration, startWirelessSession } from './WirelessControl';
 export interface TunnelAuth {certificate:Uint8Array;sign(challenge:Uint8Array):Promise<Uint8Array>;}
 export class TunnelControl {
   private link:Iap2Link=new Iap2Link();private csm:CsmObserver=new CsmObserver();
   private closed:boolean=false;private identified:boolean=false;private authenticated:boolean=false;
   private signed:boolean=false;
+  private diagnostics:IapControlDiagnostics=new IapControlDiagnostics();
   private wifiSent:number=0;private starts:number=0;
   private auth:TunnelAuth;private settings:WirelessSettings;private mac:string;private publicKey:string;private serial:string;
   private now:()=>number;private encode:(text:string)=>Uint8Array;private send:(bytes:Uint8Array)=>Promise<void>;
@@ -34,6 +35,7 @@ export class TunnelControl {
   }
   private async answer(id:number,body:Uint8Array):Promise<void>{
     if(this.closed){return;}let response:Uint8Array|undefined;
+    if(this.authenticated){const summary=this.diagnostics.observe(id,body);if(summary){this.report('Wi-Fi iAP2 诊断：'+summary);}}
     if(id===0x1d00){
       this.identified=false;this.authenticated=false;this.signed=false;
       response=identification(this.serial,this.encode,this.mac,wirelessComponent(this.settings.ssid,this.encode));

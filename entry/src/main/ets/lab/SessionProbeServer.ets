@@ -12,12 +12,14 @@ import { ControlCipher } from './ControlCipher';
 import { mfiSap } from './MfiSap';
 import { ExperimentalAuth } from './ExperimentalAuth';
 import { Plist, decodePlist, encodePlist } from './Bplist';
-import { receiverInfo } from './ReceiverInfo';
+import { receiverInfo, declaredAudioFormats, DeclaredAudioFormat } from './ReceiverInfo';
 import { DisplayProfile } from './DisplayProfile';
 import { SessionResources } from './SessionResources';
 import { NativeScreenServer } from './NativeScreenServer';
 import { NativeAudioServer } from './NativeAudioServer';
-import { pcmFormat } from './AudioCodec';
+import { NativeMicrophone, probeMicrophone } from './NativeMicrophone';
+import { audioSetupSummary, airPlayCommandName, audioCommandSummary, capabilityRequestSummary } from './AudioDiagnostics';
+import { pcmFormat, pcmBitsAvailable } from './AudioCodec';
 import { AirPlayDiscovery } from './AirPlayDiscovery';
 import { modeSummary } from './ModeDiagnostics';
 import { probeOpus } from './CodecCapability';
@@ -35,7 +37,9 @@ class SessionPeer {
   resources:SessionResources|undefined;bluetoothAddress:string='';
   screen:NativeScreenServer|undefined;display:DisplayProfile=new DisplayProfile();
   audio:NativeAudioServer[]=[];remoteAddress:string='';
+  audioRequests:number=0;audioWatch:number=-1;
   tunnel:NativeIapTunnel|undefined;wireless:WirelessSettings|undefined;publicKey:string='';serial:string='';
+  handoffRequested:boolean=false;tunnelAuthenticated:boolean=false;handoffComplete:boolean=false;
   constructor(client:socket.TCPSocketConnection){this.client=client;}
 }
 
@@ -44,12 +48,15 @@ export class SessionProbeServer {
   private peers:SessionPeer[]=[];private generation:number=0;
   private discovery:AirPlayDiscovery|undefined;
   private opus:boolean=false;
+  private microphone:number=0;
+  // Mirrors what /info advertises for this session, so SETUP can validate the phone's format bits.
+  private declared:DeclaredAudioFormat[]=[];
   private report:(message:string)=>void;
-  private tunnelReady:()=>void;
+  private releaseBootstrap:()=>void;
   private sessionEvent:(event:string)=>void;
   constructor(report:(message:string)=>void,tunnelReady:()=>void=():void=>{},sessionEvent:(event:string)=>void=(_event:string):void=>{}){
-    this.report=report;this.tunnelReady=tunnelReady;this.sessionEvent=sessionEvent;}
-  async start(identity?:ReceiverIdentity,context?:common.UIAbilityContext,bluetoothAddress:string='',gateway:string='',wireless?:WirelessSettings,profile:DisplayProfile=new DisplayProfile()):Promise<void>{
+    this.report=report;this.releaseBootstrap=tunnelReady;this.sessionEvent=sessionEvent;}
+  async start(identity?:ReceiverIdentity,context?:common.UIAbilityContext,bluetoothAddress:string='',gateway:string='',wireless?:WirelessSettings,profile:DisplayProfile=new DisplayProfile(),microphone:boolean=false):Promise<void>{
     const stopping=this.stop();const generation=this.generation;await stopping;
     if(generation!==this.generation){throw new Error('会话监听启动已取消');}
     let store:PairingStore|undefined;
@@ -57,10 +64,16 @@ export class SessionProbeServer {
     if(identity){if(!context){throw new Error('缺少配对存储上下文');}store=await PairingStore.load(context);auth=await ExperimentalAuth.load(context);}
     if(generation!==this.generation){throw new Error('会话监听启动已取消');}
     if(identity){
+      if(microphone){
+        const input=await probeMicrophone(():boolean=>generation!==this.generation);
+        if(generation!==this.generation){throw new Error('会话监听启动已取消');}this.microphone=input;
+        this.report(input>0?`麦克风采集器格式检查通过：PCM mask=${input}；等待手机请求后采集`:'麦克风不可用，保留仅输出音频声明');
+      }else{this.report('麦克风实验关闭：本次不声明音频输入');}
       const supported=await probeOpus(():boolean=>generation!==this.generation);
       if(generation!==this.generation){throw new Error('会话监听启动已取消');}this.opus=supported;
       this.report(supported?'Opus 原生解码自检通过：48 kHz 单声道，已启用无线音频格式':'Opus 原生解码自检未通过，暂不声明该格式');
     }
+    this.declared=declaredAudioFormats(this.opus,this.microphone);
     const server=socket.constructTCPSocketServerInstance();this.server=server;
     server.on('connect',(client:socket.TCPSocketConnection):void=>{
       if(generation!==this.generation||this.peers.length>=4){client.close().catch(():void=>{});return;}
@@ -147,6 +160,7 @@ export class SessionProbeServer {
           this.report('AirPlay MFiSAP 认证响应已发送，等待手机后续请求');
         }else if(request.method==='SETUP'&&peer.authenticated&&peer.verify?.shared&&peer.crypto){
           const setup=decodePlist(request.body);if(setup.kind!=='dict'){throw new Error('SETUP 需要 plist 字典');}
+          this.report('AirPlay SETUP 请求字段：'+capabilityRequestSummary(request.body));
           const streams=setup.entries.get('streams');
           if(streams){
             if(streams.kind!=='array'){throw new Error('SETUP streams 格式错误');}
@@ -155,6 +169,10 @@ export class SessionProbeServer {
             for(let i=0;i<streams.items.length;i++){
               const stream=streams.items[i];if(stream.kind!=='dict'){throw new Error('无效媒体流字典');}
               const type=stream.entries.get('type');if(!type){throw new Error('媒体流缺少类型');}const number=type.number();
+              this.report(`媒体 SETUP 请求：type=${number}`);
+              // Isolate audio failures only; preserve the existing video/iAP failure policy.
+              let pendingAudio:NativeAudioServer|undefined;
+              try{
               if(number===130){
                 const uuid=stream.entries.get('clientTypeUUID'),seed=stream.entries.get('seed'),connection=stream.entries.get('streamConnectionID');
                 if(uuid?.kind!=='str'||uuid.text.toUpperCase()!==IAP_DATASTREAM_UUID||!seed||seed.kind!=='int'||seed.integer<BigInt(0)||
@@ -162,10 +180,14 @@ export class SessionProbeServer {
                 const remote=await peer.client.getRemoteAddress();
                 const key=await peer.crypto.hkdf(peer.verify.shared,ascii('DataStream-Salt'+seed.integer.toString()),ascii('DataStream-Output-Encryption-Key'));
                 if(peer.closed||generation!==this.generation){key.fill(0);return;}
-                peer.tunnel=new NativeIapTunnel(key,peer.crypto,remote.address,peer.resources,auth,peer.wireless,peer.bluetoothAddress,peer.publicKey,peer.serial,
+                const tunnel:NativeIapTunnel=new NativeIapTunnel(key,peer.crypto,remote.address,peer.resources,auth,peer.wireless,peer.bluetoothAddress,peer.publicKey,peer.serial,
                   (message:string):void=>{if(!peer.closed&&generation===this.generation){this.report(message);}},
-                  ():void=>{if(!peer.closed&&generation===this.generation){this.tunnelReady();}},
+                  ():void=>{if(!peer.closed&&generation===this.generation&&peer.tunnel===tunnel){
+                    peer.tunnelAuthenticated=true;this.report('无线交接：Wi-Fi iAP2 已认证'+(peer.handoffRequested?'':'，等待手机 disableBluetooth 指令'));
+                    this.maybeCompleteHandoff(peer,generation);
+                  }},
                   ():void=>{if(!peer.closed&&generation===this.generation){this.close(peer);}});key.fill(0);
+                peer.tunnel=tunnel;peer.tunnelAuthenticated=false;
                 const port=await peer.tunnel.start();if(peer.closed||generation!==this.generation){await peer.tunnel.close();return;}
                 const response=Plist.dict(['type','streamID','dataPort'],[Plist.int(130),Plist.int(1),Plist.int(port)]);
                 if(connection){if(connection.kind!=='int'||connection.integer<BigInt(0)||connection.integer>BigInt('18446744073709551615')){throw new Error('iAP 连接编号无效');}
@@ -181,21 +203,53 @@ export class SessionProbeServer {
                 const dataPort=await peer.screen.start();if(peer.closed||generation!==this.generation){await peer.screen.close();return;}
                 responseStreams.push(Plist.dict(['type','dataPort'],[Plist.int(110),Plist.int(dataPort)]));
               }else if(number===100||number===101||number===102){
+                // Counted and reported before any validation so the log always shows what the phone asked for.
+                peer.audioRequests++;
+                this.report('音频 SETUP 请求：'+audioSetupSummary(stream));
                 const connection=stream.entries.get('streamConnectionID'),bits=stream.entries.get('audioFormat');
-                if(!connection||connection.kind!=='int'||!bits){throw new Error('音频流缺少格式或连接编号');}
+                if(!connection||connection.kind!=='int'||connection.integer<BigInt(0)||connection.integer>BigInt('18446744073709551615')||!bits||bits.kind!=='int'){
+                  throw new Error('音频流缺少有效格式或连接编号');}
                 const format=pcmFormat(bits.number()),name=stream.entries.get('audioType');
-                if(format.codec==='opus'&&!this.opus){throw new Error('本机 Opus 解码尚未验证');}
-                const names=['compatibility','default','alert','media','telephony','speechRecognition'];
-                const audioType=name?.kind==='str'?name.text:'default';
+                const names=['compatibility','default','alert','media','telephony','speechrecognition'];
+                const audioType=name?.kind==='str'?name.text.toLowerCase():'default';
                 if(!names.includes(audioType)){throw new Error('音频用途无效');}
+                if(format.codec==='opus'&&!this.opus){throw new Error('本机 Opus 解码尚未验证');}
+                // The phone may only pick bits the accessory declared for this (type, audioType).
+                {
+                  let available=0;for(let k=0;k<this.declared.length;k++){
+                    const entry=this.declared[k];
+                    if(entry.type===number&&entry.audioType.toLowerCase()===audioType){available=entry.output;}
+                  }
+                  if(!pcmBitsAvailable(bits.number(),available)){throw new Error('音频格式超出已声明能力');}
+                }
                 for(let j=peer.audio.length-1;j>=0;j--){if(peer.audio[j].type===number&&peer.audio[j].audioType===audioType){const old=peer.audio.splice(j,1)[0];await old.close();}}
                 if(peer.closed||generation!==this.generation){return;}if(peer.audio.length>=4){throw new Error('音频流数量超限');}
                 const key=await peer.crypto.hkdf(peer.verify.shared,ascii('DataStream-Salt'+connection.integer.toString()),ascii('DataStream-Output-Encryption-Key'));
                 if(peer.closed||generation!==this.generation){key.fill(0);return;}
                 const audio=new NativeAudioServer(number,audioType,connection.integer,format,key,peer.crypto,peer.remoteAddress,
-                  (message:string):void=>{if(!peer.closed&&generation===this.generation){this.report(message);}});key.fill(0);peer.audio.push(audio);
-                const response=await audio.start();if(peer.closed||generation!==this.generation){await audio.close();return;}responseStreams.push(response);
+                  (message:string):void=>{if(!peer.closed&&generation===this.generation){this.report(message);}});key.fill(0);pendingAudio=audio;
+                const inputPort=stream.entries.get('dataPort');
+                if(this.microphone!==0&&number===100&&['compatibility','default','telephony','speechrecognition'].includes(audioType)&&inputPort){
+                  if(format.codec!=='pcm'||format.channels!==1||(bits.number()&this.microphone)===0){throw new Error('手机请求了未声明的麦克风格式');}
+                  const port=inputPort.number();if(port<1||port>65535){throw new Error('手机麦克风端口无效');}
+                  const frames=stream.entries.get('framesPerPacket');
+                  const inputKey=await peer.crypto.hkdf(peer.verify.shared,ascii('DataStream-Salt'+connection.integer.toString()),ascii('DataStream-Input-Encryption-Key'));
+                  try{
+                    if(peer.closed||generation!==this.generation){await audio.close();return;}
+                    audio.microphone=new NativeMicrophone(format,inputKey,peer.crypto,peer.remoteAddress,port,frames?frames.number():0,
+                      (message:string):void=>{if(!peer.closed&&generation===this.generation){this.report(message);}});
+                    this.report('麦克风回传已准备：等待已认证音频首包');
+                  }finally{inputKey.fill(0);}
+                }
+                const response=await audio.start();if(peer.closed||generation!==this.generation){await audio.close();return;}
+                peer.audio.push(audio);pendingAudio=undefined;responseStreams.push(response);
               }else{this.report(`暂未支持 AirPlay 媒体流类型 ${number}`);}
+              }catch(error){
+                if(number!==100&&number!==101&&number!==102){throw new Error((error as Error).message);}
+                if(pendingAudio){await pendingAudio.close().catch(():void=>{});}
+                // Native/API exception text may contain private peer fields: emit a fixed reason only.
+                this.report(`音频流 ${number} 未建立：格式、能力或资源检查失败；保留画面与控制会话`);
+              }
             }
             await this.respond(peer,request,200,'OK',encodePlist(Plist.dict(['streams'],[Plist.array(responseStreams)])),false,'application/x-apple-binary-plist');
             this.report('AirPlay 媒体流 SETUP 已应答');
@@ -212,15 +266,26 @@ export class SessionProbeServer {
             this.report('AirPlay 初始 SETUP 已应答，等待媒体流配置');
           }
         }else if(rawPath==='/info'&&peer.authenticated){
-          await this.respond(peer,request,200,'OK',encodePlist(receiverInfo(peer.bluetoothAddress,this.opus,peer.display)),false,'application/x-apple-binary-plist');
-          this.report(`AirPlay /info 已发送：${peer.display.width}×${peer.display.height}、30 FPS、H.264，PCM/AAC`+(this.opus?'/Opus':'')+' 音频输出已启用');
+          this.report('AirPlay /info 请求字段：'+capabilityRequestSummary(request.body));
+          await this.respond(peer,request,200,'OK',encodePlist(receiverInfo(peer.bluetoothAddress,this.opus,peer.display,this.microphone)),false,'application/x-apple-binary-plist');
+          this.report(`AirPlay /info 已发送：${peer.display.width}×${peer.display.height}；音频输出能力已声明，等待手机 SETUP；麦克风 PCM mask=${this.microphone}`);
+          if(peer.audioWatch<0){peer.audioWatch=setTimeout(():void=>{
+            peer.audioWatch=-1;if(!peer.closed&&generation===this.generation){this.report(`音频协商检查：30 秒内收到 ${peer.audioRequests} 条音频 SETUP；当前 ${peer.audio.length} 条音频流`);}
+          },30000);}
         }else if(request.method==='POST'&&rawPath==='/command'&&peer.authenticated){
           const command=decodePlist(request.body);if(command.kind!=='dict'){throw new Error('command 需要 plist 字典');}
           const type=command.entries.get('type'),name=type?.kind==='str'?type.text:'';
-          const commands=['requestUI','modesChanged','updateHIDDevice','updateVehicleInformation','setNightMode','disableBluetooth','disable-bluetooth'];
-          this.report(`AirPlay 控制命令 ${commands.includes(name)?name:'其他命令'} 已接收`);
+          this.report(`AirPlay 控制命令 ${airPlayCommandName(command)} 已接收`);
+          if(['setUpStreams','tearDownStreams','duckAudio','unduckAudio','flushAudio','setAudioVolume'].includes(name)){
+            this.report('AirPlay 音频控制字段：'+audioCommandSummary(command));
+          }
           if(name==='modesChanged'){this.report('AirPlay 资源状态：'+modeSummary(command));}
           await this.respond(peer,request,200,'OK',new Uint8Array(0),false);
+          const handoffName=name.toLowerCase();
+          if((handoffName==='disablebluetooth'||handoffName==='disable-bluetooth')&&peer.wireless&&!peer.closed&&generation===this.generation){
+            if(!peer.handoffRequested){peer.handoffRequested=true;this.report('无线交接：手机 disableBluetooth 已应答'+(peer.tunnelAuthenticated?'':'，等待 Wi-Fi iAP2 认证'));}
+            this.maybeCompleteHandoff(peer,generation);
+          }
         }else if(rawPath==='/feedback'&&peer.resources){
           const feedback=Plist.dict(['streams'],[Plist.array(peer.audio.map((audio:NativeAudioServer):Plist=>audio.feedback(peer.resources!.clock)))]);
           await this.respond(peer,request,200,'OK',encodePlist(feedback),false,'application/x-apple-binary-plist');
@@ -237,7 +302,7 @@ export class SessionProbeServer {
               const type=streams.items[i].entries.get('type');if(!type){throw new Error('TEARDOWN 缺少类型');}const number=type.number();
               if(number===110){const screen=peer.screen;peer.screen=undefined;if(screen){await screen.close();screenStopped=true;}}
               if(number===130){const streamId=streams.items[i].entries.get('streamID');
-                if(!streamId||streamId.number()===1){const tunnel=peer.tunnel;peer.tunnel=undefined;if(tunnel){await tunnel.close();}}}
+                if(!streamId||streamId.number()===1){const tunnel=peer.tunnel;peer.tunnel=undefined;peer.tunnelAuthenticated=false;if(tunnel){await tunnel.close();}}}
               for(let j=peer.audio.length-1;j>=0;j--){if(peer.audio[j].type===number){const audio=peer.audio.splice(j,1)[0];await audio.close();}}
             }
             if(peer.closed||generation!==this.generation){return;}
@@ -257,6 +322,15 @@ export class SessionProbeServer {
     const wire=peer.cipher?await peer.cipher.seal(bytes):bytes;
     await peer.client.send({data:wire.buffer as ArrayBuffer});
   }
+  // DiPlay closes only the RFCOMM bootstrap after both signals, in either order.
+  // These flags belong to one authenticated AirPlay session; discovery alone cannot release Bluetooth.
+  private maybeCompleteHandoff(peer:SessionPeer,generation:number):void{
+    if(peer.closed||generation!==this.generation||!peer.authenticated||!peer.wireless||!peer.tunnel||
+      !peer.handoffRequested||!peer.tunnelAuthenticated||peer.handoffComplete){return;}
+    peer.handoffComplete=true;
+    this.report('无线交接：手机指令与 Wi-Fi iAP2 认证均完成，释放蓝牙引导连接');
+    this.releaseBootstrap();
+  }
   private refresh(peer:SessionPeer):void{
     if(peer.timer>=0){clearTimeout(peer.timer);}peer.timer=setTimeout(():void=>{this.close(peer);},45000);
   }
@@ -266,11 +340,13 @@ export class SessionProbeServer {
     }
   }
   private forget(peer:SessionPeer):void{
+    if(peer.audioWatch>=0){clearTimeout(peer.audioWatch);peer.audioWatch=-1;}
     const hadScreen=peer.screen!==undefined;
     peer.pairing?.dispose();peer.verify?.dispose();peer.cipher?.dispose();peer.chunks=[];peer.queue=[];peer.queuedBytes=0;
     peer.resources?.close().catch(():void=>{});
     peer.screen?.close().catch(():void=>{});
     peer.tunnel?.close().catch(():void=>{});peer.tunnel=undefined;peer.wireless=undefined;
+    peer.tunnelAuthenticated=false;peer.handoffRequested=false;
     peer.audio.forEach((audio:NativeAudioServer):void=>{audio.close().catch(():void=>{});});peer.audio=[];
     if(peer.timer>=0){clearTimeout(peer.timer);peer.timer=-1;}
     const index=this.peers.indexOf(peer);if(index>=0){this.peers.splice(index,1);}
@@ -278,7 +354,7 @@ export class SessionProbeServer {
   }
   private close(peer:SessionPeer):void{peer.closed=true;peer.queue=[];this.forget(peer);peer.client.close().catch(():void=>{});}
   async stop():Promise<void>{
-    this.generation++;this.opus=false;const peers=this.peers.slice();for(let i=0;i<peers.length;i++){this.close(peers[i]);}
+    this.generation++;this.opus=false;this.microphone=0;const peers=this.peers.slice();for(let i=0;i<peers.length;i++){this.close(peers[i]);}
     const server=this.server;this.server=undefined;if(server){await server.close().catch(():void=>{});}
     const discovery=this.discovery;this.discovery=undefined;if(discovery){await discovery.close();}
   }

@@ -1,5 +1,6 @@
 {
   "string": [
+    {"name":"microphone_reason","value":"开启音频实验后，按 iPhone 的语音请求采集并加密回传麦克风声音；不保存录音"},
     {
       "name": "module_desc",
       "value": "DiPlay Harmony 无线 CarPlay 显示接收端"

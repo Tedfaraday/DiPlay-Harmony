@@ -20,7 +20,7 @@ export class AirPlayDiscovery {
     const key=identity.keys.pubKey.getEncoded().data.slice(12);let hex='';for(let i=0;i<key.length;i++){hex+=key[i].toString(16).padStart(2,'0');}
     if(this.localAddress){
       const hotspot=new HotspotMdns(this.localAddress,this.deviceId,this.report,(address:string,port:number):void=>{
-        if(this.closed||this.candidates.length>=16){return;}this.candidates.push({serviceType:'_carplay._tcp',serviceName:'authenticated-phone',host:{address,family:1,port:0},port});this.probeCandidates();
+        if(this.closed||this.candidates.length>=16){return;}this.candidates.push({serviceType:'_carplay-ctrl._tcp',serviceName:'authenticated-phone',host:{address,family:1,port:0},port});this.probeCandidates();
       });
       try{hotspot.start(identity);this.hotspot=hotspot;}
       catch(error){
@@ -36,7 +36,7 @@ export class AirPlayDiscovery {
       if(this.closed){await mdns.removeLocalService(this.context,service).catch(():void=>{});return;}
       this.service=service;this.report('AirPlay 服务已注册，音频功能位与 /info 一致；热点可发现性待验证');
     }
-    const discovery=mdns.createDiscoveryService(this.context,'_carplay._tcp');this.discovery=discovery;
+    const discovery=mdns.createDiscoveryService(this.context,'_carplay-ctrl._tcp');this.discovery=discovery;
     discovery.on('serviceFound',(info:mdns.LocalServiceInfo):void=>{
       if(this.closed||this.candidates.length>=16){return;}
       mdns.resolveLocalService(this.context,info).then((resolved:mdns.LocalServiceInfo):void=>{

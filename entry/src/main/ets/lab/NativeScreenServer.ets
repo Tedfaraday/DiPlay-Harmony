@@ -1,7 +1,7 @@
 import { socket } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { NativePairCrypto } from './NativePairCrypto';
-import { ScreenParser, h264Configuration, annexB, screenNonce } from './ScreenCodec';
+import { ScreenParser, ScreenReceiveQueue, h264Configuration, annexB, screenNonce } from './ScreenCodec';
 import { VideoBridge } from './VideoBridge';
 import { DisplayProfile } from './DisplayProfile';
 
@@ -10,7 +10,7 @@ export class NativeScreenServer {
   private server:socket.TCPSocketServer|undefined;private client:socket.TCPSocketConnection|undefined;
   private parser:ScreenParser=new ScreenParser();private key:Uint8Array;private crypto:NativePairCrypto;
   private closed:boolean=false;private counter:bigint=BigInt(0);private owner:number=0;private configured:boolean=false;
-  private chunks:Uint8Array[]=[];private queuedBytes:number=0;private reading:boolean=false;private frames:number=0;
+  private chunks:ScreenReceiveQueue=new ScreenReceiveQueue();private reading:boolean=false;private frames:number=0;
   private report:(message:string)=>void;private timer:number=-1;private rendered:boolean=false;
   private metadataSeen:boolean=false;
   private onRendered:()=>void;private onEnded:()=>void;
@@ -22,9 +22,11 @@ export class NativeScreenServer {
     server.on('connect',(client:socket.TCPSocketConnection):void=>{
       if(this.closed||this.client){client.close().catch(():void=>{});return;}this.client=client;this.report('AirPlay 屏幕数据连接已到达');
       client.on('message',(message:socket.SocketMessageInfo):void=>{
-        if(this.closed){return;}if(this.chunks.length>=32||this.queuedBytes+message.message.byteLength>16*1024*1024){this.fail('视频接收队列超限');return;}
-        const chunk=new Uint8Array(message.message);this.chunks.push(chunk);this.queuedBytes+=chunk.length;
-        this.receive().catch((error:Error):void=>{this.fail(error.message);});
+        if(this.closed){return;}
+        try{
+          this.chunks.push(new Uint8Array(message.message));
+          this.receive().catch((error:Error):void=>{this.fail(error.message);});
+        }catch(error){this.fail((error as Error).message);}
       });
       client.on('error',(_error:BusinessError):void=>{this.fail('屏幕数据连接错误');});
       client.on('close',():void=>{if(!this.closed){this.report('AirPlay 屏幕数据连接关闭');this.close().catch(():void=>{});this.onEnded();}});
@@ -48,27 +50,33 @@ export class NativeScreenServer {
   }
   private async receive():Promise<void>{
     if(this.reading){return;}this.reading=true;
-    try{while(this.chunks.length>0&&!this.closed){
-      const chunk=this.chunks.shift();if(!chunk){break;}this.queuedBytes-=chunk.length;const packets=this.parser.feed(chunk);
-      for(let i=0;i<packets.length;i++){
-        const packet=packets[i],opcode=packet.header[4];
-        if(opcode===1){
-          const config=h264Configuration(packet.body);VideoBridge.instance.feed(this.owner,config,true,0);this.configured=true;
-          this.report('AirPlay H.264 SPS/PPS 已提交给原生解码器');
-        }else if(opcode===0){
-          if(!this.configured||packet.body.length<16){throw new Error('视频帧缺少配置或认证标签');}
-          const plain=await this.crypto.open(this.key,screenNonce(this.counter),packet.body,packet.header);
-          if(this.closed){plain.fill(0);return;}this.counter++;
-          const frame=annexB(plain);VideoBridge.instance.feed(this.owner,frame,false,Math.floor(this.frames*1000000/30));this.frames++;
-          if(this.frames===1){this.report('AirPlay 首个视频帧已认证、解密并提交解码');}
-        }else if(!this.metadataSeen){this.metadataSeen=true;this.report(`AirPlay 屏幕元数据类型 ${opcode} 已跳过，继续接收视频`);}
+    try{
+      while(this.chunks.size>0&&!this.closed){
+        let chunk=this.chunks.take();if(!chunk){break;}
+        let more=true;
+        while(more&&!this.closed){
+          const packets=this.parser.feed(chunk);more=packets.length===64;chunk=new Uint8Array(0);
+          for(let i=0;i<packets.length;i++){
+            const packet=packets[i],opcode=packet.header[4];
+            if(opcode===1){
+              const config=h264Configuration(packet.body);VideoBridge.instance.feed(this.owner,config,true,0);this.configured=true;
+              this.report('AirPlay H.264 SPS/PPS 已提交给原生解码器');
+            }else if(opcode===0){
+              if(!this.configured||packet.body.length<16){throw new Error('视频帧缺少配置或认证标签');}
+              const plain=await this.crypto.open(this.key,screenNonce(this.counter),packet.body,packet.header);
+              if(this.closed){plain.fill(0);return;}this.counter++;
+              const frame=annexB(plain);VideoBridge.instance.feed(this.owner,frame,false,Math.floor(this.frames*1000000/30));this.frames++;
+              if(this.frames===1){this.report('AirPlay 首个视频帧已认证、解密并提交解码');}
+            }else if(!this.metadataSeen){this.metadataSeen=true;this.report(`AirPlay 屏幕元数据类型 ${opcode} 已跳过，继续接收视频`);}
+          }
+        }
       }
-    }}finally{this.reading=false;}
+    }finally{this.reading=false;}
   }
   private fail(message:string):void{if(this.closed){return;}this.report(`AirPlay 视频停止：${message}`);this.close().catch(():void=>{});this.onEnded();}
   async close():Promise<void>{
     if(this.closed){return;}this.closed=true;if(this.timer>=0){clearInterval(this.timer);this.timer=-1;}
-    this.key.fill(0);this.parser.clear();this.chunks=[];this.queuedBytes=0;VideoBridge.instance.release(this.owner);this.owner=0;
+    this.key.fill(0);this.parser.clear();this.chunks.clear();VideoBridge.instance.release(this.owner);this.owner=0;
     const client=this.client,server=this.server;this.client=undefined;this.server=undefined;
     if(client){await client.close().catch(():void=>{});}if(server){await server.close().catch(():void=>{});}
   }

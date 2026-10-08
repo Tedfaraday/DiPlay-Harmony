@@ -8,6 +8,28 @@ function packet(op,body){const h=Buffer.alloc(128);h.writeUInt32LE(body.length);
 let count=0;async function check(name,fn){await fn();count++;console.log('PASS '+name);}
 const tick=()=>new Promise(r=>setImmediate(r));
 (async()=>{
+await check('TCP queue preserves many tiny fragments, block boundaries and reuse',()=>{
+const q=new screen.ScreenReceiveQueue(),source=Buffer.alloc(150003);for(let i=0;i<source.length;i++)source[i]=i%251;
+q.push(new Uint8Array(0));assert.equal(q.take(),undefined);
+for(let i=0;i<source.length;i+=37)q.push(source.subarray(i,i+37));assert.equal(q.size,source.length);
+const first=q.take();assert.equal(first.length,65536);q.push(Buffer.from([252,253]));
+const parts=[Buffer.from(first)];while(q.size)parts.push(Buffer.from(q.take()));
+assert.deepEqual(Buffer.concat(parts),Buffer.concat([source,Buffer.from([252,253])]));assert.equal(q.take(),undefined);
+q.push(Buffer.from([1,2]));q.clear();assert.equal(q.size,0);assert.equal(q.take(),undefined);
+q.push(Buffer.from([3]));assert.deepEqual(Array.from(q.take()),[3]);assert.deepEqual(Buffer.from(first),source.subarray(0,65536));
+});
+await check('TCP queue byte bound rejects atomically and permits reuse after clear',()=>{
+const q=new screen.ScreenReceiveQueue();q.push(Buffer.alloc(16*1024*1024,7));assert.throws(()=>q.push(Buffer.from([8])),/字节超限/);
+assert.equal(q.size,16*1024*1024);assert.equal(q.take()[0],7);q.push(Buffer.alloc(65536,9));assert.equal(q.size,16*1024*1024);
+q.clear();q.push(Buffer.from([4,5]));assert.deepEqual(Array.from(q.take()),[4,5]);
+});
+await check('screen parser drains bounded batches without losing coalesced or partial packets',()=>{
+const parser=new screen.ScreenParser(),packets=Array.from({length:151},(_,i)=>packet(2,Buffer.from([i]))),last=packet(2,Buffer.from([151,152]));
+const first=parser.feed(Buffer.concat([...packets,last.subarray(0,129)])),second=parser.feed(new Uint8Array(0)),third=parser.feed(new Uint8Array(0));
+assert.equal(first.length,64);assert.equal(second.length,64);assert.equal(third.length,23);assert.equal(parser.feed(new Uint8Array(0)).length,0);
+assert.deepEqual([...first,...second,...third].map(p=>p.body[0]),Array.from({length:151},(_,i)=>i));
+const tail=parser.feed(last.subarray(129));assert.equal(tail.length,1);assert.deepEqual(Array.from(tail[0].body),[151,152]);
+});
 await check('screen header/body fragments and multiple packets remain distinct and bounded',()=>{
 const bytes=Buffer.concat([packet(1,avc),packet(0,Buffer.alloc(32))]);for(let i=0;i<bytes.length;i++){const parser=new screen.ScreenParser(),parts=[...parser.feed(bytes.subarray(0,i)),...parser.feed(bytes.subarray(i))];assert.equal(parts.length,2);assert.equal(parts[0].header[4],1);assert.deepEqual(Buffer.from(parts[0].body),avc);}
 const bad=Buffer.alloc(128);bad.writeUInt32LE(8*1024*1024+1);assert.throws(()=>new screen.ScreenParser().feed(bad),/limit/);
@@ -36,6 +58,33 @@ client.emit('message',{message:Uint8Array.from(packet(1,avc)).buffer});await tic
 // Replay uses nonce zero after the receiver advanced to nonce one: reject and close.
 client.emit('message',{message:Uint8Array.from(bytes).buffer});await tick();assert.equal(feeds.length,3);assert.equal(client.closed,true);assert.equal(released,true);
 await service.close();
+});
+await check('native screen tolerates fragmented bursts during asynchronous decrypt and preserves nonce order',async()=>{
+const endpoints=[],feeds=[],logs=[],nonces=[];let release,started=false,ended=0;
+const gate=new Promise(r=>release=r);
+class Endpoint{handlers={};closed=false;on(n,h){this.handlers[n]=h;}emit(n,v){this.handlers[n]?.(v);}async listen(){}async getLocalAddress(){return{port:30000};}async close(){this.closed=true;}}
+const bridge={claim:()=>1,feed:(o,b,c)=>feeds.push({bytes:Buffer.from(b),config:c}),stats:()=>[feeds.length,0,0,0],release:()=>{}};
+const {NativeScreenServer}=load('NativeScreenServer',{'./ScreenCodec':screen,'./VideoBridge':{VideoBridge:{instance:bridge}},'@kit.NetworkKit':{socket:{constructTCPSocketServerInstance:()=>{const e=new Endpoint();endpoints.push(e);return e;}}}},'.ets');
+const key=crypto.randomBytes(32),native={open:async(k,n,d,aad)=>{nonces.push(Buffer.from(n).readBigUInt64LE(4));if(!started){started=true;await gate;}
+const c=crypto.createDecipheriv('chacha20-poly1305',k,n,{authTagLength:16});c.setAAD(aad);c.setAuthTag(d.slice(-16));return Buffer.concat([c.update(d.slice(0,-16)),c.final()]);}};
+function encrypted(i){const plain=Buffer.from([0,0,0,2,0x65,i]),h=Buffer.alloc(128),n=Buffer.alloc(12);h.writeUInt32LE(plain.length+16);n.writeBigUInt64LE(BigInt(i),4);
+const c=crypto.createCipheriv('chacha20-poly1305',key,n,{authTagLength:16});c.setAAD(h);return Buffer.concat([h,c.update(plain),c.final(),c.getAuthTag()]);}
+const receiver=new NativeScreenServer(key,native,m=>logs.push(m),()=>{},()=>ended++);await receiver.start();const client=new Endpoint();endpoints[0].emit('connect',client);
+const emit=b=>client.emit('message',{message:Uint8Array.from(b).buffer});emit(Buffer.concat([packet(1,avc),encrypted(0)]));assert.equal(started,true);
+const burst=Buffer.concat(Array.from({length:199},(_,i)=>encrypted(i+1)));for(let i=0;i<burst.length;i+=19)emit(burst.subarray(i,i+19));
+assert.equal(client.closed,false);assert.equal(ended,0);release();await tick();await tick();assert.equal(feeds.length,201);
+assert.deepEqual(nonces,Array.from({length:200},(_,i)=>BigInt(i)));assert.deepEqual(feeds.slice(1).map(p=>p.bytes[5]),Array.from({length:200},(_,i)=>i));
+assert.equal(client.closed,false);assert.equal(ended,0);await receiver.close();
+});
+await check('closing during asynchronous decrypt clears late plaintext and prevents delivery',async()=>{
+let connect,release,feeds=0;const plain=Buffer.from([0,0,0,2,0x65,1]),gate=new Promise(r=>release=r);
+const server={on(n,h){if(n==='connect')connect=h;},async listen(){},async getLocalAddress(){return{port:30000};},async close(){}};
+const handlers={},client={on(n,h){handlers[n]=h;},async close(){}};
+const bridge={claim:()=>1,feed:()=>feeds++,stats:()=>[0,0,0,0],release:()=>{}};
+const {NativeScreenServer}=load('NativeScreenServer',{'./ScreenCodec':screen,'./VideoBridge':{VideoBridge:{instance:bridge}},'@kit.NetworkKit':{socket:{constructTCPSocketServerInstance:()=>server}}},'.ets');
+const receiver=new NativeScreenServer(new Uint8Array(32),{open:async()=>{await gate;return plain;}},()=>{});await receiver.start();connect(client);
+handlers.message({message:Uint8Array.from(Buffer.concat([packet(1,avc),packet(0,Buffer.alloc(22))])).buffer});assert.equal(feeds,1);
+await receiver.close();release();await tick();assert.equal(feeds,1);assert.deepEqual(Array.from(plain),[0,0,0,0,0,0]);
 });
 await check('first rendered frame is reported once; video failure ends session and cancels polling',async()=>{
 let poll,rendered=0,ended=0,output=0,error=0,released=0,cleared=0;

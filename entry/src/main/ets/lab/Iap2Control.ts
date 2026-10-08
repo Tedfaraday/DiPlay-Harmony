@@ -40,6 +40,36 @@ export function parameterIds(body: Uint8Array): number[] {
   return result;
 }
 
+// Observation only: never echo TLV strings or change protocol responses. Bound distinct reports.
+export class IapControlDiagnostics {
+  private seen:string[]=[];
+  observe(id:number,body:Uint8Array):string{
+    if(!Number.isInteger(id)||id<0||id>65535||this.seen.length>=24){return '';}
+    if([0x1d00,0x1d02,0x1d03,0xaa00,0xaa02,0xaa04,0xaa05].includes(id)){return '';}
+    let summary='';
+    try{
+      if(id===0x4e0d){summary='wirelessUpdate='+this.availability(body);}
+      else if(id===0x4300){
+        const names=['wired','wireless','themeAssets'],parts:string[]=[];
+        for(let i=0;i<3;i++){const groups=readParameters(body,i);parts.push(names[i]+'='+(groups.length===0?'absent':groups.length===1?this.availability(groups[0]):'invalid'));}
+        summary=parts.join(',');
+      }else if(id===0x4e0e){
+        const bt=readParameters(body,0),usb=readParameters(body,1);
+        summary='transportBluetoothPresent='+(bt.length===1&&bt[0].length>0?'yes':'no')+',transportUsbPresent='+(usb.length===1&&usb[0].length>0?'yes':'no');
+      }else if(id===0x5702){summary='wifiConfigurationRequested';}
+      else{summary='unhandled,bytes='+Math.min(body.length,65535);}
+    }catch(_error){summary='invalidDiagnosticFields';}
+    const result='id=0x'+id.toString(16)+','+summary;
+    if(this.seen.includes(result)){return '';}
+    this.seen.push(result);return result;
+  }
+  private availability(body:Uint8Array):string{
+    const values=readParameters(body,0);if(values.length===0){return 'absent';}
+    if(values.length!==1||values[0].length!==1||values[0][0]>1){return 'invalid';}
+    return values[0][0]===1?'yes':'no';
+  }
+}
+
 export function identification(serial: string, encode: (text: string) => Uint8Array, bluetoothAddress: string = '',
   wireless: Uint8Array | undefined = undefined): Uint8Array {
   const strings = ['DiPlay Harmony','MatePad-mini','DiPlayHarmony',serial,'0.11.0','HarmonyOS'];

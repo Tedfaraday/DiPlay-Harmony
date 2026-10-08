@@ -3,20 +3,43 @@ const ts=require(process.env.DIPLAY_TYPESCRIPT||'typescript');
 function load(name,deps={}){const exports={};const extension=name==='SessionProbeServer'?'.ets':'.ts';
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/lab',name+extension),'utf8'),
 {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,
-{exports,Uint8Array,DataView,setTimeout,clearTimeout,require:id=>id==='./DisplayProfile'?load('DisplayProfile'):deps[id]});return exports;}
+{exports,Uint8Array,DataView,setTimeout,clearTimeout,require:id=>id==='./DisplayProfile'?load('DisplayProfile'):id==='./ReceiverInfo'?load('ReceiverInfo',{'./Bplist':load('Bplist',{'./PairingCore':load('PairingCore')})}):deps[id]});return exports;}
 const parser=load('RtspProbe'),pairing=load('PairingCore'),control=load('ControlCipher',{'./PairingCore':pairing});const tick=()=>new Promise(r=>setImmediate(r));
+// AudioDiagnostics now derives negotiated PCM details from AudioCodec, so the real module is loaded here too.
+const realCodec=load('AudioCodec');
 function deferred(){let resolve;const promise=new Promise(r=>resolve=r);return{resolve,promise};}
-function fixture(extra={}){const servers=[],messages=[],events=[];
+function fixture(extra={}){const servers=[],messages=[],events=[],handoffs=[];
 class Endpoint{handlers={};closed=false;sent=[];listenGate=undefined;closeGate=undefined;
 on(name,handler){this.handlers[name]=handler;}emit(name,data){this.handlers[name]?.(data);}
 async close(){if(this.closeGate)await this.closeGate.promise;this.closed=true;this.emit('close');}
 async listen(){if(this.listenGate)await this.listenGate.promise;}
 async send(data){this.sent.push(data);if(this.sendGate)await this.sendGate.promise;}}
-const {SessionProbeServer}=load('SessionProbeServer',{'./IapPackages':load('IapPackages',{'./PairingCore':pairing}),'./CodecCapability':{probeOpus:async()=>false},'./AirPlayDiscovery':{AirPlayDiscovery:class{async start(){}async close(){}approvePeer(){}}},'./RtspProbe':parser,'./PairingCore':pairing,'@kit.NetworkKit':{socket:{constructTCPSocketServerInstance:()=>{
+const {SessionProbeServer}=load('SessionProbeServer',{'./AudioDiagnostics':load('AudioDiagnostics',{'./AudioCodec':realCodec,'./Bplist':load('Bplist',{'./PairingCore':pairing})}),'./IapPackages':load('IapPackages',{'./PairingCore':pairing}),'./CodecCapability':{probeOpus:async()=>false},'./AirPlayDiscovery':{AirPlayDiscovery:class{async start(){}async close(){}approvePeer(){}}},'./RtspProbe':parser,'./PairingCore':pairing,'@kit.NetworkKit':{socket:{constructTCPSocketServerInstance:()=>{
 const s=new Endpoint();servers.push(s);return s;}}},'@kit.ArkTS':{util:{TextEncoder:class{encodeInto(t){return new TextEncoder().encode(t);}}}},...extra});
-return{service:new SessionProbeServer(m=>messages.push(m),()=>{},e=>events.push(e)),servers,messages,events,Endpoint};}
+return{service:new SessionProbeServer(m=>messages.push(m),()=>handoffs.push(true),e=>events.push(e)),servers,messages,events,handoffs,Endpoint};}
+async function handoffFixture(){
+ const bp=load('Bplist',{'./PairingCore':pairing}),{Plist:P,encodePlist}=bp,tunnels=[];
+ class Tunnel{constructor(...args){this.args=args;tunnels.push(this);}async start(){return 32100;}async close(){this.closed=true;}ready(){this.args[10]();}}
+ const f=fixture({'./Bplist':bp,'./NativeIapTunnel':{NativeIapTunnel:Tunnel}});await f.service.start();
+ const connect=()=>{const c=new f.Endpoint();c.getRemoteAddress=async()=>({address:'192.168.43.2'});f.servers.at(-1).emit('connect',c);const peer=f.service.peers.at(-1);
+  peer.authenticated=true;peer.verify={shared:new Uint8Array(32),dispose(){}};peer.crypto={hkdf:async()=>new Uint8Array(32)};peer.resources={async close(){}};peer.wireless={ssid:'lab',passphrase:'do-not-log'};
+  return{c,peer};};
+ const request=async(peer,path,body,method='POST')=>{peer.queue.push(new parser.RtspRequest(method,path,'RTSP/1.0','7',encodePlist(body)));await f.service.drain(peer,f.service.generation,{});};
+ const setup=peer=>request(peer,'/',P.dict(['streams'],[P.array([P.dict(['type','clientTypeUUID','seed'],[P.int(130),P.str('E9459FD0-BCAD-4C45-820F-1E72447EF2F2'),P.int(42)])])]),'SETUP');
+ const command=(peer,name='disableBluetooth')=>request(peer,'/command',P.dict(['type'],[P.str(name)]));
+ return{...f,P,tunnels,connect,request,setup,command};
+}
 let count=0;async function check(name,fn){await fn();count++;console.log('PASS '+name);}
 (async()=>{
+await check('authenticated audio command observations preserve empty 200 replies and cannot log supplied secrets',async()=>{
+ const f=await handoffFixture(),{c,peer}=f.connect(),{P}=f;
+ const params=P.dict(['streams','data','url'],[P.array([P.dict(['type'],[P.int(102)])]),P.bytes(new TextEncoder().encode('private-audio')),P.str('private-url')]);
+ await f.request(peer,'/command',P.dict(['type','params'],[P.str('setUpStreams'),params]));
+ const wire=Buffer.from(c.sent.at(-1).data).toString();assert.match(wire,/200 OK/);assert.match(wire,/Content-Length: 0/);
+ assert.ok(f.messages.some(m=>m.includes('setUpStreams')));assert.ok(f.messages.some(m=>m.includes('streamTypes=102')));
+ assert.ok(f.messages.every(m=>!m.includes('private')));assert.equal(peer.audioRequests,0);assert.equal(peer.audio.length,0);assert.equal(c.closed,false);
+ await f.service.stop();
+});
 await check('native server waits for body then responds explicit 501 without logging credentials',async()=>{
 const f=fixture();await f.service.start();const c=new f.Endpoint();f.servers[0].emit('connect',c);
 c.emit('message',{message:new TextEncoder().encode('POST /pair-setup?secret=do-not-log HTTP/1.1\r\nContent-Length: 3\r\nCSeq: 9\r\n\r\n').buffer});
@@ -58,7 +81,7 @@ assert.equal(c.closed,true);assert.ok(f.messages.some(m=>m.includes('Pair-Verify
 await check('audio SETUP returns both UDP ports and feedback; partial TEARDOWN preserves video/control',async()=>{
 const {Plist:P,encodePlist,decodePlist}=load('Bplist',{'./PairingCore':pairing}),keys=[],audioStreams=[];let screenClosed=0;
 class Audio{constructor(type,name,connection,format,key){Object.assign(this,{type,audioType:name,connection,format,key});audioStreams.push(this);}async start(){return P.dict(['type','dataPort','controlPort','streamConnectionID'],[P.int(this.type),P.int(40000),P.int(40001),P.int(this.connection)]);}feedback(){return P.dict(['type','sampleRate'],[P.int(this.type),P.int(this.format.rate)]);}async close(){this.closed=true;}}
-const f=fixture({'./Bplist':{Plist:P,encodePlist,decodePlist},'./AudioCodec':load('AudioCodec'),'./NativeAudioServer':{NativeAudioServer:Audio}});
+const f=fixture({'./Bplist':{Plist:P,encodePlist,decodePlist},'./AudioCodec':realCodec,'./NativeAudioServer':{NativeAudioServer:Audio}});
 await f.service.start();const c=new f.Endpoint();f.servers[0].emit('connect',c);const peer=f.service.peers[0];peer.authenticated=true;peer.verify={shared:new Uint8Array(32),dispose(){}};
 peer.crypto={hkdf:async(k,s,i)=>{keys.push(new TextDecoder().decode(s));return new Uint8Array(32);}};
 peer.resources={clock:{ntp:()=>123n},async close(){}};peer.screen={closed:false,async close(){if(!this.closed){this.closed=true;screenClosed++;}}};peer.remoteAddress='192.168.43.2';
@@ -118,6 +141,83 @@ const info=await request('GET','/info');assert.equal(info.entries.get('displays'
 await request('SETUP','/',P.dict([],[]));assert.equal(resources[0],display);
 await request('SETUP','/',P.dict(['streams'],[P.array([P.dict(['type','streamConnectionID'],[P.int(110),P.int(42)])])]));assert.equal(screens[0],display);
 await f.service.stop();
+});
+await check('duplex SETUP derives separate input key, normalizes speech type, never starts capture during SETUP',async()=>{
+ const bp=load('Bplist',{'./PairingCore':pairing}),{Plist:P,encodePlist}=bp,salts=[],mics=[],streams=[];
+ class Audio{constructor(type,audioType){Object.assign(this,{type,audioType});streams.push(this);}async start(){return P.dict(['type'],[P.int(100)]);}async close(){await this.microphone?.close();}}
+ class Mic{constructor(...args){this.args=args;this.key=new Uint8Array(args[1]);mics.push(this);}async start(){throw Error('must not record yet');}async close(){this.closed=true;}}
+ const f=fixture({'./Bplist':bp,'./AudioCodec':load('AudioCodec'),'./NativeAudioServer':{NativeAudioServer:Audio},'./NativeMicrophone':{NativeMicrophone:Mic}});
+ await f.service.start();f.service.microphone=16;const c=new f.Endpoint();f.servers[0].emit('connect',c);const peer=f.service.peers[0];
+ peer.authenticated=true;peer.verify={shared:new Uint8Array(32),dispose(){}};peer.resources={async close(){}};peer.remoteAddress='192.0.2.10';
+ peer.crypto={hkdf:async(k,s,i)=>{salts.push(new TextDecoder().decode(i));return new Uint8Array(32).fill(salts.length);}};
+ const stream=P.dict(['type','audioType','audioFormat','streamConnectionID','dataPort','framesPerPacket'],[P.int(100),P.str('speechRecognition'),P.int(16),P.int(42),P.int(41000),P.int(320)]);
+ peer.queue.push(new parser.RtspRequest('SETUP','/','RTSP/1.0','1',encodePlist(P.dict(['streams'],[P.array([stream])]))));await f.service.drain(peer,f.service.generation,undefined);
+ assert.deepEqual(salts,['DataStream-Output-Encryption-Key','DataStream-Input-Encryption-Key']);assert.equal(mics.length,1);assert.equal(mics[0].args[3],'192.0.2.10');assert.equal(mics[0].args[4],41000);assert.ok(mics[0].key.every(x=>x===2));assert.ok(mics[0].args[1].every(x=>x===0));assert.equal(peer.audioRequests,1);assert.equal(streams[0].audioType,'speechrecognition');await f.service.stop();assert.equal(mics[0].closed,true);
+});
+await check('unsupported audio stays observable while valid audio and video in the same SETUP survive',async()=>{
+ const bp=load('Bplist',{'./PairingCore':pairing}),{Plist:P,encodePlist,decodePlist}=bp,created=[];
+ class Audio{constructor(type,audioType){Object.assign(this,{type,audioType});created.push(this);}async start(){return P.dict(['type'],[P.int(100)]);}async close(){this.closed=true;}}
+ const f=fixture({'./Bplist':bp,'./AudioCodec':realCodec,'./NativeAudioServer':{NativeAudioServer:Audio},
+ './NativeScreenServer':{NativeScreenServer:class{async start(){return 31000;}async close(){this.closed=true;}}}});
+ await f.service.start();const c=new f.Endpoint();f.servers[0].emit('connect',c);const peer=f.service.peers[0];
+ peer.authenticated=true;peer.verify={shared:new Uint8Array(32),dispose(){}};peer.crypto={hkdf:async()=>new Uint8Array(32)};peer.resources={async close(){}};
+ const stream=(type,name,bits)=>P.dict(['type','audioType','audioFormat','streamConnectionID'],[P.int(type),P.str(name),P.int(bits),P.int(42)]);
+ const streams=[stream(100,'media',0xc3fc),stream(100,'media',32768),stream(110,'media',32768),stream(102,'media',0x400000)];
+ peer.queue.push(new parser.RtspRequest('SETUP','/','RTSP/1.0','1',encodePlist(P.dict(['streams'],[P.array(streams)]))));
+ await f.service.drain(peer,f.service.generation,undefined);
+ const wire=Buffer.from(c.sent.at(-1).data),response=decodePlist(wire.subarray(wire.indexOf('\r\n\r\n')+4)).entries.get('streams').items;
+ assert.equal(JSON.stringify(response.map(s=>s.entries.get('type').number())),JSON.stringify([100,110]));
+ assert.equal(peer.audioRequests,3);assert.equal(peer.audio.length,1);assert.equal(created.length,1);assert.equal(c.closed,false);assert.ok(peer.screen);
+ assert.ok(f.messages.some(m=>m.includes('audioFormat=50172')));assert.ok(f.messages.some(m=>m.includes('音频流 102 未建立')));
+ await f.service.stop();assert.equal(created[0].closed,true);
+});
+await check('failed audio preparation and failed start release pending resources without stale feedback entries',async()=>{
+ const bp=load('Bplist',{'./PairingCore':pairing}),{Plist:P,encodePlist}=bp,created=[];
+ class Audio{constructor(type,audioType){Object.assign(this,{type,audioType});created.push(this);}async start(){throw Error('private-peer-and-token');}async close(){this.closed=true;}}
+ const f=fixture({'./Bplist':bp,'./AudioCodec':realCodec,'./NativeAudioServer':{NativeAudioServer:Audio}});
+ await f.service.start();f.service.microphone=16;const c=new f.Endpoint();f.servers[0].emit('connect',c);const peer=f.service.peers[0];
+ peer.authenticated=true;peer.verify={shared:new Uint8Array(32),dispose(){}};peer.crypto={hkdf:async()=>new Uint8Array(32)};peer.resources={async close(){}};
+ for(const invalidPort of [true,false]){
+  const stream=P.dict(['type','audioType','audioFormat','streamConnectionID'],[P.int(100),P.str('default'),P.int(16),P.int(42)]);
+  if(invalidPort){stream.entries.set('dataPort',P.int(70000));}
+  peer.queue.push(new parser.RtspRequest('SETUP','/','RTSP/1.0','1',encodePlist(P.dict(['streams'],[P.array([stream])]))));
+  await f.service.drain(peer,f.service.generation,undefined);assert.equal(peer.audio.length,0);assert.equal(c.closed,false);
+ }
+ assert.equal(created.length,2);assert.ok(created.every(a=>a.closed));assert.ok(f.messages.every(m=>!m.includes('private-peer')));await f.service.stop();
+});
+await check('video SETUP failure still propagates to the original session failure handler',async()=>{
+ const bp=load('Bplist',{'./PairingCore':pairing}),{Plist:P,encodePlist}=bp;
+ const f=fixture({'./Bplist':bp,'./NativeScreenServer':{NativeScreenServer:class{async start(){throw Error('video-start-failed');}async close(){}}}});
+ await f.service.start();const c=new f.Endpoint();f.servers[0].emit('connect',c);const peer=f.service.peers[0];
+ peer.authenticated=true;peer.verify={shared:new Uint8Array(32),dispose(){}};peer.crypto={hkdf:async()=>new Uint8Array(32)};peer.resources={async close(){}};
+ const stream=P.dict(['type','streamConnectionID'],[P.int(110),P.int(42)]);
+ peer.queue.push(new parser.RtspRequest('SETUP','/','RTSP/1.0','1',encodePlist(P.dict(['streams'],[P.array([stream])]))));
+ await assert.rejects(f.service.drain(peer,f.service.generation,undefined),/video-start-failed/);assert.equal(c.sent.length,0);await f.service.stop();
+});
+await check('Wi-Fi authentication alone cannot release bootstrap; phone handoff command is acknowledged before release',async()=>{
+ const f=await handoffFixture(),{c,peer}=f.connect();await f.setup(peer);f.tunnels[0].ready();assert.equal(f.handoffs.length,0);
+ const gate=deferred();c.sendGate=gate;const pending=f.command(peer);await tick();assert.equal(f.handoffs.length,0);
+ assert.match(new TextDecoder().decode(c.sent.at(-1).data),/^RTSP\/1.0 200 OK/);gate.resolve();await pending;
+ assert.equal(f.handoffs.length,1);assert.equal(c.closed,false);assert.equal(f.tunnels[0].closed,undefined);
+ for(const alias of ['disableBluetooth','disable-bluetooth','DisableBluetooth']){await f.command(peer,alias);f.tunnels[0].ready();}
+ assert.equal(f.handoffs.length,1);await f.service.stop();
+});
+await check('handoff command before tunnel authentication waits, and signals from different sessions cannot combine',async()=>{
+ const f=await handoffFixture(),a=f.connect(),b=f.connect();await f.command(a.peer);await f.setup(b.peer);f.tunnels[0].ready();assert.equal(f.handoffs.length,0);
+ await f.setup(a.peer);f.tunnels[1].ready();assert.equal(f.handoffs.length,1);assert.equal(a.c.closed,false);assert.equal(b.c.closed,false);
+ assert.ok(f.messages.every(m=>!m.includes('do-not-log')));await f.service.stop();
+});
+await check('stopped or torn-down tunnels cannot release a later bootstrap through stale authentication callbacks',async()=>{
+ const f=await handoffFixture(),a=f.connect();await f.command(a.peer);await f.setup(a.peer);
+ await f.request(a.peer,'/',f.P.dict(['streams'],[f.P.array([f.P.dict(['type'],[f.P.int(130)])])]),'TEARDOWN');
+ f.tunnels[0].ready();assert.equal(f.handoffs.length,0);assert.equal(a.peer.tunnelAuthenticated,false);
+ await f.setup(a.peer);assert.equal(f.handoffs.length,0);await f.service.stop();f.tunnels[1].ready();assert.equal(f.handoffs.length,0);
+ await f.service.start();const b=f.connect();await f.setup(b.peer);f.tunnels[2].ready();assert.equal(f.handoffs.length,0);await f.command(b.peer);assert.equal(f.handoffs.length,1);await f.service.stop();
+});
+await check('unauthenticated command cannot request Bluetooth handoff',async()=>{
+ const f=await handoffFixture(),{c,peer}=f.connect();peer.authenticated=false;await f.command(peer);
+ assert.match(new TextDecoder().decode(c.sent.at(-1).data),/^RTSP\/1.0 501 Not Implemented/);
+ assert.equal(peer.handoffRequested,false);assert.equal(f.handoffs.length,0);assert.equal(c.closed,true);await f.service.stop();
 });
 console.log(count+' native session server tests passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

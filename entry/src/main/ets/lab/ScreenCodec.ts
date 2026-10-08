@@ -1,6 +1,29 @@
 // GPL-3.0-only. Adapted from DiPlay ScreenStream.kt / ScreenCodec.
 import { concat, ascii, equalBytes } from './PairingCore';
 export class ScreenPacket {header:Uint8Array;body:Uint8Array;constructor(header:Uint8Array,body:Uint8Array){this.header=header;this.body=body;}}
+class ScreenBlock {
+  data:Uint8Array=new Uint8Array(65536);used:number=0;
+}
+// TCP callbacks are arbitrary fragments, not video frames. Bound bytes and normalize fragments
+// into fixed blocks so a burst of tiny reads does not exhaust an object-count limit.
+export class ScreenReceiveQueue {
+  private blocks:ScreenBlock[]=[];
+  size:number=0;
+  push(bytes:Uint8Array):void{
+    if(bytes.length>16*1024*1024-this.size){throw new Error('视频接收队列字节超限');}
+    let offset=0;
+    while(offset<bytes.length){
+      let block=this.blocks[this.blocks.length-1];
+      if(!block||block.used===block.data.length){block=new ScreenBlock();this.blocks.push(block);}
+      const count=Math.min(bytes.length-offset,block.data.length-block.used);
+      block.data.set(bytes.subarray(offset,offset+count),block.used);block.used+=count;offset+=count;this.size+=count;
+    }
+  }
+  take():Uint8Array|undefined{
+    const block=this.blocks.shift();if(!block){return undefined;}this.size-=block.used;return block.data.subarray(0,block.used);
+  }
+  clear():void{this.blocks=[];this.size=0;}
+}
 export class ScreenParser {
   private buffer:Uint8Array=new Uint8Array(0);
   feed(bytes:Uint8Array):ScreenPacket[]{
@@ -9,7 +32,8 @@ export class ScreenParser {
     while(this.buffer.length-offset>=128){
       const size=new DataView(this.buffer.buffer,this.buffer.byteOffset+offset,4).getUint32(0,true);
       if(size>8*1024*1024){throw new Error('Screen body limit');}if(this.buffer.length-offset<128+size){break;}
-      if(packets.length>=64){throw new Error('Screen packet queue limit');}
+      // Yield a bounded batch and retain the rest for feed(empty), without discarding TCP data.
+      if(packets.length>=64){break;}
       packets.push(new ScreenPacket(this.buffer.slice(offset,offset+128),this.buffer.slice(offset+128,offset+128+size)));offset+=128+size;
     }
     this.buffer=this.buffer.slice(offset);return packets;

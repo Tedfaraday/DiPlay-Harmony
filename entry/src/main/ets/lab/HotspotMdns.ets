@@ -13,7 +13,7 @@ export class HotspotMdns {
   private address:string;private deviceId:string;private report:(message:string)=>void;
   private resolved:(address:string,port:number)=>void;private handle:number=0;private timer:number=-1;
   private closed:boolean=false;private approved:string='';private own:DnsRecord[]=[];private cache:CachedDns[]=[];
-  private instance:DnsName;private hostname:DnsName;private browse:DnsName=new DnsName(['_carplay','_tcp','local']);
+  private instance:DnsName;private hostname:DnsName;private browse:DnsName=new DnsName(['_carplay-ctrl','_tcp','local']);
   private airplay:DnsName=new DnsName(['_airplay','_tcp','local']);private enumeration:DnsName=new DnsName(['_services','_dns-sd','_udp','local']);
   private ready:number=0;private probes:number=0;private announced:boolean=false;private nextAnnouncement:number=0;
   private nextBrowse:number=0;private browseCount:number=0;private lastQuery:number=-10000;private nextReport:number=0;
@@ -127,7 +127,7 @@ export class HotspotMdns {
     for(let i=0;i<packet.records.length;i++){
       const record=packet.records[i];if(![1,12,33].includes(record.type)){continue;}
       if(record.type===12&&record.name.key()!==this.browse.key()){continue;}
-      if(record.type===12){this.ptrSeen=true;}if(record.type===33&&record.name.labels.slice(-3).join('.').toLowerCase()==='_carplay._tcp.local'){this.srvSeen=true;}
+      if(record.type===12){this.ptrSeen=true;}if(record.type===33&&record.name.labels.slice(-3).join('.').toLowerCase()==='_carplay-ctrl._tcp.local'){this.srvSeen=true;}
       this.cache=this.cache.filter((entry:CachedDns):boolean=>!(entry.source===source&&entry.record.name.key()===record.name.key()&&entry.record.type===record.type&&
         (record.flush||entry.record.target?.key()===record.target?.key())));
       if(record.ttl>0&&this.cache.length<64){this.cache.push(new CachedDns(record,source,now+Math.min(record.ttl,120)*1000));}

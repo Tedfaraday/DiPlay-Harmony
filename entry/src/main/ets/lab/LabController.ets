@@ -5,7 +5,7 @@ import { BusinessError, systemDateTime } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
 import { Iap2Probe, IAP2_UUID, IAP2_MARKER } from './Iap2Probe';
 import { Iap2Link, CsmObserver } from './Iap2Link';
-import { controlMessage, parameter, parameterIds, readParameters, identification } from './Iap2Control';
+import { controlMessage, parameter, parameterIds, readParameters, identification, IapControlDiagnostics } from './Iap2Control';
 import { ExperimentalAuth } from './ExperimentalAuth';
 import { ReceiverIdentity } from './ReceiverIdentity';
 import { WirelessSettings, wifiConfiguration, wirelessComponent, startWirelessSession } from './WirelessControl';
@@ -20,6 +20,8 @@ export class PairedDevice {
 }
 
 export class LabState {
+  microphonePermission:string='尚未检查';microphoneGranted:boolean=false;
+  microphoneEnabled:boolean=false;microphonePermissionBusy:boolean=false;
   phase:string='idle';connectionError:string='';connectedAt:number=0;foreground:boolean=true;
   hotspot: string = '尚未检测';
   hotspotEvent: string = '尚未收到事件';
@@ -66,6 +68,7 @@ export class LabController {
   private markerSeen: boolean = false;
   private link: Iap2Link | undefined;
   private csm: CsmObserver = new CsmObserver();
+  private controlDiagnostics:IapControlDiagnostics=new IapControlDiagnostics();
   private linkTimer: number = -1;
   private authentication: Promise<ExperimentalAuth | undefined> | undefined;
   private pendingControls: number = 0;
@@ -90,6 +93,65 @@ export class LabController {
   private connectionTimer:number=-1;
   private wirelessGeneration: number = 0;
   private preparingWireless: boolean = false;
+  microphoneEnabled:boolean=false;
+
+  refreshMicrophonePermission():boolean{
+    const previous=this.state.microphonePermission;
+    try{
+      const status=abilityAccessCtrl.createAtManager().getSelfPermissionStatus('ohos.permission.MICROPHONE');
+      this.state.microphoneGranted=status===0;
+      this.state.microphonePermission=status===0?'已允许':status===-1?'未允许':status===1?'尚未申请':status===3?'系统限制':'权限声明或状态异常';
+    }catch(error){
+      this.state.microphoneGranted=false;this.state.microphonePermission=`查询失败（${(error as BusinessError).code??0}）`;
+    }
+    if(!this.state.microphoneGranted){this.microphoneEnabled=false;}
+    this.state.microphoneEnabled=this.microphoneEnabled;
+    if(previous!==this.state.microphonePermission){this.permissionLog('鸿蒙麦克风权限状态：'+this.state.microphonePermission);}
+    this.publish();return this.state.microphoneGranted;
+  }
+
+  private permissionLog(message:string):void{
+    hilog.info(0x0,'DiPlayPermission','%{public}s',message);this.log(message);
+  }
+
+  async requestMicrophonePermission(settings:boolean=false):Promise<boolean>{
+    if(!this.context||!this.state.foreground){this.permissionLog('请返回应用前台再申请麦克风权限');return false;}
+    if(this.state.microphonePermissionBusy){return false;}
+    if(this.refreshMicrophonePermission()){this.permissionLog('麦克风权限已允许，可开启回传开关');return true;}
+    const context=this.context;this.state.microphonePermissionBusy=true;this.publish();
+    try{
+      const manager=abilityAccessCtrl.createAtManager();
+      this.permissionLog(settings?'正在打开麦克风权限设置':'正在申请鸿蒙麦克风权限');
+      if(settings){
+        const result=await manager.requestPermissionOnSetting(context,['ohos.permission.MICROPHONE']);
+        if(this.context!==context){return false;}
+        this.permissionLog(`麦克风权限设置返回：授权=${result[0]??-1}`);
+      }else{
+        const result=await manager.requestPermissionsFromUser(context,['ohos.permission.MICROPHONE']);
+        if(this.context!==context){return false;}
+        this.permissionLog(`麦克风权限申请返回：授权=${result.authResults[0]??-1}，弹窗=${result.dialogShownResults?.[0]===true?'是':'否'}，原因=${result.errorReasons?.[0]??0}`);
+      }
+    }catch(error){
+      if(this.context===context){this.permissionLog(`麦克风权限申请失败，错误码 ${(error as BusinessError).code??0}；可在系统应用权限中检查`);}
+    }finally{
+      if(this.context===context){this.state.microphonePermissionBusy=false;this.refreshMicrophonePermission();}
+    }
+    if(this.context!==context){return false;}
+    this.permissionLog(this.state.microphoneGranted?'麦克风权限已允许；请开启回传开关，下次连接生效':'麦克风权限未允许；可点击权限设置重新授权');
+    return this.state.microphoneGranted;
+  }
+
+  async enableMicrophone(enabled:boolean):Promise<boolean>{
+    if(!enabled){
+      const wasEnabled=this.microphoneEnabled;this.microphoneEnabled=false;this.state.microphoneEnabled=false;
+      if(wasEnabled&&['preparing','connecting','negotiating','connected'].includes(this.state.phase)){this.stopTests('已关闭麦克风回传，当前连接已断开');}
+      this.publish();return false;
+    }
+    if(!this.context||!this.state.foreground||this.state.microphonePermissionBusy){return false;}
+    this.microphoneEnabled=this.refreshMicrophonePermission();this.state.microphoneEnabled=this.microphoneEnabled;
+    this.permissionLog(this.microphoneEnabled?'麦克风回传开关已开启；下次连接生效，仅手机请求时采集，不保存录音':'请先点击“申请麦克风权限”，允许后再开启回传');
+    return this.microphoneEnabled;
+  }
 
   private hotspotCallback: (value: number) => void = (value: number): void => {
     const labels: string[] = ['已关闭', '已开启', '正在开启', '正在关闭'];
@@ -125,6 +187,7 @@ export class LabController {
   attach(context: common.UIAbilityContext, listener: (state: LabState) => void): void {
     this.context = context;
     this.onChange = listener;
+    this.refreshMicrophonePermission();
     if (!this.subscribed) {
       try {
         wifiManager.on('hotspotStateChange', this.hotspotCallback);
@@ -300,7 +363,7 @@ export class LabController {
     try {
       const identity=await ReceiverIdentity.load(this.context);
       if(generation!==this.wirelessGeneration){return;}
-      await this.sessionProbe.start(identity,this.context,localAddress,settings.address,settings,display);
+      await this.sessionProbe.start(identity,this.context,localAddress,settings.address,settings,display,this.microphoneEnabled);
       if(generation!==this.wirelessGeneration){return;}
       this.preparingWireless=false;
       this.state.phase='connecting';
@@ -352,7 +415,7 @@ export class LabController {
             this.state.bluetooth = 'RFCOMM 已连接，等待 iAP2 检测回复';
             this.log('已连接 DiPlay 使用的 iAP2 服务 UUID');
             if (negotiate) {
-              this.link = new Iap2Link(); this.csm = new CsmObserver();
+              this.link = new Iap2Link(); this.csm = new CsmObserver();this.controlDiagnostics=new IapControlDiagnostics();
               this.link.start(this.monotonicTime()); this.pumpLink();
               this.linkTimer = setInterval((): void => {
                 if (generation !== this.bluetoothGeneration || !this.link) { return; }
@@ -439,6 +502,7 @@ export class LabController {
 
   private async answerControl(id: number, body: Uint8Array, generation: number, link: Iap2Link): Promise<void> {
     if (generation !== this.bluetoothGeneration || link !== this.link) { return; }
+    if(this.authenticated){const summary=this.controlDiagnostics.observe(id,body);if(summary){this.log('蓝牙 iAP2 诊断：'+summary);}}
     let response: Uint8Array | undefined;
     let label = '';
     if (id === 0x1d00) {
@@ -502,7 +566,7 @@ export class LabController {
   }
 
   private clearConnectionTimer():void{if(this.connectionTimer>=0){clearTimeout(this.connectionTimer);this.connectionTimer=-1;}}
-  setForeground(active:boolean):void{this.state.foreground=active;this.publish();}
+  setForeground(active:boolean):void{this.state.foreground=active;if(active&&this.context){this.refreshMicrophonePermission();}this.publish();}
 
   stopTests(reason: string): void {
     this.clearConnectionTimer();this.state.phase='idle';this.state.connectedAt=0;this.state.connectionError='';
@@ -513,6 +577,7 @@ export class LabController {
   }
 
   dispose(): void {
+    this.context=undefined;this.microphoneEnabled=false;this.state.microphoneEnabled=false;this.state.microphonePermissionBusy=false;
     this.stopTests('应用结束');
     if (this.subscribed) {
       try { wifiManager.off('hotspotStateChange', this.hotspotCallback); } catch (_error) {}

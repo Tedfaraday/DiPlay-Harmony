@@ -35,6 +35,25 @@ const gate=deferred(),f=runtimeFixture({sign:async()=>gate.promise});await f.run
 const pending=f.message(0xaa02,[iap.parameter(0,new Uint8Array(32))]);await tick();const n=f.sent.length;f.runtime.close();const signature=new Uint8Array(64).fill(7);gate.resolve(signature);await pending;
 assert.equal(f.sent.length,n);assert.equal(f.ready(),0);assert.ok(signature.every(x=>x===0));
 });
+await check('authenticated iAP diagnostics observe ignored messages without sending extra control responses',async()=>{
+ const f=runtimeFixture();await f.runtime.start();await f.runtime.feed(frame(192,99,99,0,sync));await f.message(0x1d00);await f.message(0x1d02);
+ await f.message(0xaa02,[iap.parameter(0,new Uint8Array(32))]);await f.message(0xaa05);const before=f.sent.length;
+ await f.message(0x4e0d,[iap.parameter(0,Uint8Array.of(1))]);await f.message(0x5001,[iap.parameter(0,new TextEncoder().encode('private-title'))]);
+ // Link-layer ACK output is allowed; no additional CSM response or subscription is introduced.
+ const controlResponses=f.sent.slice(before).filter(b=>b.length>15&&b[9]===64&&b[10]===64);assert.equal(controlResponses.length,0);
+ assert.ok(f.reports.some(m=>m.includes('wirelessUpdate=yes')));assert.ok(f.reports.some(m=>m.includes('id=0x5001,unhandled')));assert.ok(f.reports.every(m=>!m.includes('private-title')));
+ f.runtime.close();
+});
+await check('Wi-Fi identification preserves device-accepted message lists; no playback subscription follows authentication',async()=>{
+ const f=runtimeFixture();await f.runtime.start();await f.runtime.feed(frame(192,99,99,0,sync));await f.message(0x1d00);
+ const body=f.sent.at(-1).subarray(15,-1);
+ // Captured 0.13.1 profile accepted by this iPhone; 0.13.2 adding 0x5000 was rejected at field 6.
+ assert.deepEqual([...iap.readParameters(body,6)[0]],[0xaa,1,0xaa,3,0x57,3,0x43,1]);
+ assert.deepEqual([...iap.readParameters(body,7)[0]],[0xaa,0,0xaa,2,0xaa,4,0xaa,5,0x57,2,0x43,0,0x4e,13,0x4e,14]);
+ await f.message(0x1d02);await f.message(0xaa02,[iap.parameter(0,new Uint8Array(32))]);await f.message(0xaa05);await f.message(0xaa05);
+ assert.equal(f.ready(),1);assert.ok(!f.sent.some(b=>b.length>15&&b.readUInt16BE(13)===0x5000));
+ await f.message(0x4300);assert.equal(f.sent.at(-1).readUInt16BE(13),0x4301);f.runtime.close();
+});
 await check('success notification without an identification and challenge exchange cannot authorize handoff',async()=>{
 const f=runtimeFixture();await f.runtime.start();await f.runtime.feed(frame(192,99,99,0,sync));await assert.rejects(f.message(0xaa05),/challenge/);assert.equal(f.ready(),0);f.runtime.close();
 });

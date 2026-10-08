@@ -6,6 +6,7 @@ import { Plist as P } from './Bplist';
 import { TimingClock } from './TimingClock';
 import { PcmFormat, AudioPacket, AudioReplayWindow, PcmJitterBuffer, pcmLittleEndian } from './AudioCodec';
 import { AudioDecodeBridge } from './AudioDecodeBridge';
+import { NativeMicrophone } from './NativeMicrophone';
 
 export class NativeAudioServer {
   readonly type:number;readonly audioType:string;
@@ -17,6 +18,8 @@ export class NativeAudioServer {
   private firstSample:number=0;private origin:number=-1;private packets:number=0;private renderedBytes:number=0;
   private badPackets:number=0;private timer:number=-1;private outputReported:boolean=false;
   private decoder:AudioDecodeBridge|undefined;private decodeTimer:number=-1;
+  microphone:NativeMicrophone|undefined;
+  private datagrams:number=0;private decodedBytes:number=0;private ticks:number=0;
   constructor(type:number,audioType:string,connection:bigint,format:PcmFormat,key:Uint8Array,crypto:NativePairCrypto,remote:string,report:(message:string)=>void){
     this.type=type;this.audioType=audioType;this.connection=connection;this.format=format;this.key=new Uint8Array(key);this.crypto=crypto;this.remote=remote;this.report=report;this.pcm=new PcmJitterBuffer(format);
   }
@@ -27,7 +30,7 @@ export class NativeAudioServer {
     try{
       if(this.format.codec==='aac'||this.format.codec==='opus'){this.decoder=new AudioDecodeBridge(this.format);this.decoder.start();
         this.decodeTimer=setInterval(():void=>{if(this.closed){return;}try{
-          for(let i=0;i<16;i++){const output=this.decoder?.read();if(!output){break;}this.pcm.push(output.sample,output.pcm);}
+          for(let i=0;i<16;i++){const output=this.decoder?.read();if(!output){break;}this.decodedBytes+=output.pcm.length;this.pcm.push(output.sample,output.pcm);}
         }catch(error){this.fail((error as Error).message);}},10);
       }
       const renderer=await audio.createAudioRenderer({
@@ -36,6 +39,9 @@ export class NativeAudioServer {
         rendererInfo:{usage:audio.StreamUsage.STREAM_USAGE_MUSIC,rendererFlags:0}
       });
       if(this.closed){await renderer.release();this.check();}this.renderer=renderer;
+      renderer.getCurrentOutputDevices().then((devices:audio.AudioDeviceDescriptors):void=>{
+        if(!this.closed){this.report(`音频输出设备类型：${devices.slice(0,4).map((device:audio.AudioDeviceDescriptor):string=>String(device.deviceType)).join(',')}`);}
+      }).catch(():void=>{});
       renderer.on('writeData',(buffer:ArrayBuffer):audio.AudioDataCallbackResult=>{
         const output=new Uint8Array(buffer);output.fill(0);
         if(this.closed){return audio.AudioDataCallbackResult.INVALID;}
@@ -44,6 +50,7 @@ export class NativeAudioServer {
       const data=socket.constructUDPSocketInstance();this.data=data;
       data.on('message',(info:socket.SocketMessageInfo):void=>{
         if(this.closed||info.remoteInfo.address!==this.remote||info.message.byteLength>8192){return;}
+        if(++this.datagrams===1){this.report(`音频 UDP 首包到达：流 ${this.type}，${info.message.byteLength} 字节`);}
         if(this.chunks.length>=64){return;}this.chunks.push(new Uint8Array(info.message));
         this.receive().catch((error:Error):void=>{this.fail(error.message);});
       });
@@ -58,7 +65,9 @@ export class NativeAudioServer {
       const controlPort=(await control.getLocalAddress()).port??0;this.check();
       if(dataPort<1||controlPort<1||dataPort>65535||controlPort>65535){throw new Error('音频端口无效');}
       this.timer=setInterval(():void=>{
-        if(!this.closed&&!this.outputReported&&this.renderedBytes>0){this.outputReported=true;this.report(`鸿蒙 AudioRenderer 已输出 PCM 音频：流 ${this.type}，${this.format.rate} Hz，${this.format.channels} 声道`);}
+        if(this.closed){return;}
+        if(!this.outputReported&&this.renderedBytes>0){this.outputReported=true;this.report(`鸿蒙 AudioRenderer 已提交首段 PCM：流 ${this.type}，${this.format.rate} Hz，${this.format.channels} 声道（听感待确认）`);}
+        if(++this.ticks===5||this.ticks%30===0){this.report(`音频阶段计数：流 ${this.type}，UDP=${this.datagrams}，认证=${this.packets}，失败=${this.badPackets}，PCM=${this.decodedBytes} B，提交=${this.renderedBytes} B`);}
       },1000);
       this.report(`AirPlay ${this.format.codec.toUpperCase()} 音频流 ${this.type} 已监听：${this.format.rate} Hz，${this.format.channels} 声道`);
       return P.dict(['type','dataPort','controlPort','streamConnectionID'],[P.int(this.type),P.int(dataPort),P.int(controlPort),P.int(this.connection)]);
@@ -77,9 +86,9 @@ export class NativeAudioServer {
       this.replay.commit(packet.counter);
       try{
         if(this.decoder){this.decoder.feed(plain,packet.sample);}
-        else{this.pcm.push(packet.sample,pcmLittleEndian(plain,this.format.channels));}
+        else{this.decodedBytes+=plain.length;this.pcm.push(packet.sample,pcmLittleEndian(plain,this.format.channels));}
       }finally{plain.fill(0);}this.packets++;
-      if(this.origin<0){this.origin=this.now();this.firstSample=packet.sample;this.report(`AirPlay 音频流 ${this.type} 首包已认证、解密`);}
+      if(this.origin<0){this.origin=this.now();this.firstSample=packet.sample;this.report(`AirPlay 音频流 ${this.type} 首包已认证、解密`);this.microphone?.start().catch(():void=>{});}
       if(!this.starting&&this.renderer){
         this.starting=true;const renderer=this.renderer;await renderer.start();
         if(this.closed){await renderer.stop().catch(():void=>{});await renderer.release().catch(():void=>{});return;}
@@ -96,6 +105,7 @@ export class NativeAudioServer {
   private fail(message:string):void{if(!this.closed){this.report(`AirPlay 音频停止：${message}`);this.close().catch(():void=>{});}}
   async close():Promise<void>{
     if(this.closed){return;}this.closed=true;this.key.fill(0);this.chunks=[];this.pcm.clear();
+    const microphone=this.microphone;this.microphone=undefined;if(microphone){await microphone.close();}
     if(this.timer>=0){clearInterval(this.timer);this.timer=-1;}
     if(this.decodeTimer>=0){clearInterval(this.decodeTimer);this.decodeTimer=-1;}this.decoder?.close();this.decoder=undefined;
     const data=this.data,control=this.control,renderer=this.renderer;this.data=undefined;this.control=undefined;this.renderer=undefined;
