@@ -1,6 +1,17 @@
-# 未签名开发预览包
+# 当前未签名安装包
 
-最新版本：[0.13.11 Release](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.13.11-preview) · [下载 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/releases/download/v0.13.11-preview/DiPlay-Harmony-0.13.11-unsigned.hap)。附件未签名且不含实验认证材料，详见 Release。
+[下载完整 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/releases/download/v0.13.11-preview/DiPlayHarmony-0.13.11-unsigned.hap) · [Release](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.13.11-preview) · [校验文件](SHA256SUMS-0.13.11.txt)
+
+- 文件：`DiPlayHarmony-0.13.11-unsigned.hap`，2,572,639 字节（2.45 MiB），arm64-v8a。
+- 2026-10-25 由维护者上传，SHA-256 与本地完整未签名包一致。
+- 已内置实验 CarPlay 认证材料；用户完成自己的鸿蒙开发签名与设备授权后安装、配置连接即可，不需导入 APK 或重新编译。
+- 没有个人鸿蒙签名、设备授权 Profile、热点配置或运行日志。实验身份是包内明确提供的运行资源，不应将本包描述为“不含任何私钥”。
+- 旧 2,477,857 字节界面预览包缺少认证资源，可能报 `9001005: GetRawFileContent failed`。版本仍为 0.13.11，请以大小及下方摘要识别完整包。
+- 音频仍未解决；应用需保持前台，其他设备组合仍待验证。保留原有源码与 GPL 归属，见 [来源说明](../docs/UPSTREAM.md)。
+
+```text
+bd5582954e31d0ac7eda800b4b8f34f5de3b4ca98514764fe83fb80eec1c4027  DiPlayHarmony-0.13.11-unsigned.hap
+```
 
 ## 历史版本
 

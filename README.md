@@ -4,11 +4,15 @@
 
 让鸿蒙平板接收 iPhone 的 CarPlay 画面，并用平板触控操作。当前为 **0.13.11 产品预览版**：无线画面、单指触控、沉浸全屏与重连已完成真机验证；**音频暂不可用，需要保持应用前台**。
 
-## 历史未签名 HAP
+## 下载与安装
 
-[下载 0.12.0 未签名 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/raw/refs/heads/main/releases/DiPlay-Harmony-0.12.0-unsigned.hap) · [发行说明](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.12.0-preview) · [包校验与使用边界](releases/README.md)
+**[下载完整未签名 HAP（0.13.11，2.45 MB）](https://github.com/Tedfaraday/DiPlay-Harmony/releases/download/v0.13.11-preview/DiPlayHarmony-0.13.11-unsigned.hap)** · [Release](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.13.11-preview) · [SHA-256 校验](releases/SHA256SUMS-0.13.11.txt)
 
-该包从公开脱敏源码构建，**需要自行签名，且不包含实验认证材料**。签名后可查看应用界面；完整无线连接需在本地导入认证材料并重新构建，不能仅靠给本附件签名实现。公开包没有个人设备授权 Profile、用户热点配置或开发者签名。
+2026-10-25 已由维护者替换为完整本地未签名构建，内置连接所需的实验 CarPlay 认证材料。**使用自己的鸿蒙开发者签名与设备授权对 HAP 签名后安装，再完成蓝牙、热点与应用连接配置即可尝试连接；不需要导入原版 APK 或重新编译。** 未签名包不能跳过鸿蒙签名直接安装。
+
+此前公开的 2,477,857 字节界面预览包缺少认证资源，会报 `9001005: GetRawFileContent failed`。遇到该错误请重新下载本页的新包并重新签名安装；版本号仍为 0.13.11，应以文件名、大小及 SHA-256 区分。完整包为 `DiPlayHarmony-0.13.11-unsigned.hap`，2,572,639 字节。
+
+音频仍未解决，应用需保持前台。首次蓝牙配对、热点设置和连接配置仍需自行完成；不同设备与 iOS 版本的兼容性以实测为准。
 
 ## 与 DiPlay 的关联
 
@@ -56,7 +60,7 @@
 
 ## 从源码构建
 
-公开仓库提供源码、无签名构建模板、测试和介绍资料，**不提供个人开发签名 HAP，也不包含实验认证私钥**。
+公开仓库提供源码、无签名构建模板、测试和介绍资料，不提供个人鸿蒙开发签名。2026-10-25 维护者更新的 Release HAP 已内置实验 CarPlay 认证材料，下载附件后无需自行导入或重编译；Git 源码树仍只保留加载接口与本地导入脚本。
 
 1. 安装 DevEco Studio 与 HarmonyOS SDK。开发环境为 DevEco 26 / API 26，工程兼容配置为 API 24。
 2. 用 DevEco 打开工程，安装 ohpm 依赖。先将 `build-profile.template.json5` 复制为 `build-profile.json5`；模板没有签名信息。
@@ -79,7 +83,7 @@ Pop-Location
 .\tools\import-auth.ps1 -ApkPath '<本地 DiPlay APK 路径>'
 ```
 
-实验身份不是 Apple 为本项目签发的 MFi 认证；其来源、兼容性和分发边界见 [来源说明](docs/UPSTREAM.md)。本仓库不重新分发该私钥。
+实验身份不是 Apple 为本项目签发的 MFi 认证；其来源、兼容性和分发边界见 [来源说明](docs/UPSTREAM.md)。当前由维护者上传的完整 Release HAP 已内置该实验身份；Git 源码树不单独提交认证二进制文件。实验 CarPlay 身份与个人鸿蒙开发签名完全独立。
 
 ## 自动化检查
 
@@ -101,7 +105,7 @@ npm run audit:public
 
 ## 隐私与开源
 
-数据在本机保存，诊断由用户主动复制；应用不会自动上传诊断记录。公开快照采用文件白名单重新建立，排除了签名、认证材料、原始日志、设备序列号和本机路径。详见 [隐私与发布检查](docs/PRIVACY.md)。
+数据在本机保存，诊断由用户主动复制；应用不会自动上传诊断记录。公开快照采用文件白名单重新建立，排除了个人鸿蒙签名、原始日志、设备序列号和本机路径。2026-10-25 更新的 Release HAP 内置实验 CarPlay 身份，见下方更新说明。详见 [隐私与发布检查](docs/PRIVACY.md)。
 
 代码遵循 **GPL-3.0-only**，见 [LICENSE](LICENSE)、[NOTICE](NOTICE.md) 与 [来源映射](docs/UPSTREAM.md)。Material Symbols 介绍图标遵循 Apache-2.0。CarPlay 名称与界面属于 Apple；本项目并非 Apple 官方认证产品。
 
@@ -112,12 +116,14 @@ npm run audit:public
 - 收紧音频格式与流类型校验，补充麦克风权限申请和默认关闭的回传实验开关。
 - 新增受限的协商诊断：只记录白名单字段存在性、消息类型和计数，不输出原始协议载荷。
 - 22 个测试文件、185 项检查通过。完整本地版本的约 98 秒会话中画面与触控流畅，未见队列超限或自动重连；此结果不代表长时间稳定性已经完成验证。
-- **音频仍未解决**：手机仍播放音乐，没有新增输出设备，30 秒观察未收到音频 SETUP。公开未签名包不含认证材料，不能直接复现完整本地连接。
+- **音频仍未解决**：手机仍播放音乐，没有新增输出设备，30 秒观察未收到音频 SETUP。首次发布的公开未签名包不含认证材料；2026-10-25 已由维护者上传内置认证材料的完整包，见下方下载更新。
 
 详细发布说明见 [0.13.11](docs/releases/0.13.11.md)。介绍 PPT 为此前的 0.12.0 介绍，最新状态以本页和 Release 为准。
 
-## 当前未签名安装包
+## 2026-10-25 下载包更正
 
-[0.13.11 Release](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.13.11-preview) · [下载 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/releases/download/v0.13.11-preview/DiPlay-Harmony-0.13.11-unsigned.hap)
+维护者已将 Release 附件更新为完整的 `DiPlayHarmony-0.13.11-unsigned.hap`。补齐旧公开附件缺失的实验认证材料，处理启动阶段的 `GetRawFileContent failed`，未宣称修复音频或新增功能。源码版本、协议逻辑仍为 0.13.11。
 
-未签名且不含认证材料，不能直接安装或完整连接；请先阅读 Release 的本地签名与认证导入边界。
+[当前 Release](https://github.com/Tedfaraday/DiPlay-Harmony/releases/tag/v0.13.11-preview) · [完整未签名 HAP](https://github.com/Tedfaraday/DiPlay-Harmony/releases/download/v0.13.11-preview/DiPlayHarmony-0.13.11-unsigned.hap) · [校验文件](releases/SHA256SUMS-0.13.11.txt)
+
+SHA-256：`bd5582954e31d0ac7eda800b4b8f34f5de3b4ca98514764fe83fb80eec1c4027`。旧 0.12.0 界面预览包仍作为历史文件保留，不作为当前安装入口。
